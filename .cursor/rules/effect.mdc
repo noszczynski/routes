@@ -1,0 +1,731 @@
+---
+alwaysApply: false
+---
+
+# Effect.js Guidelines
+
+## Czym jest Effect.js?
+
+Effect.js to biblioteka do zarządzania efektami ubocznymi (baza danych, API, błędy) w typesafe sposób. Używamy **tylko minimalnego wycinka** do obsługi logiki endpointów ORPC.
+
+## Kiedy używać Effect?
+
+- **Indywidualna decyzja programisty** - nie jest wymagane dla wszystkich route'ów
+- Zalecane dla złożonej logiki biznesowej z wieloma krokami
+- Szczególnie przydatne gdy potrzebna jest precyzyjna obsługa błędów
+
+## Podstawowe API (tylko to, co niezbędne)
+
+### 1. Effect.gen() - główna funkcja do pisania logiki
+
+```typescript
+/* Deklaratywny, czytelny kod - używaj tego do logiki biznesowej */
+const myEffect = Effect.gen(function* () {
+	const user = yield* getUserFromDb(userId);
+	const resource = yield* getResourceForUser(user.id);
+	return { user, resource };
+});
+```
+
+### 2. Effect.tryPromise() - owijanie Promise'ów
+
+```typescript
+/* Owijanie operacji async (np. Prisma) */
+Effect.tryPromise({
+	try: async () => await db.resource.findUnique({ where: { id } }),
+	catch: (error) => new DatabaseError(error),
+});
+```
+
+### 3. Effect.promise() - Promise bez obsługi błędów
+
+```typescript
+/* Gdy nie potrzebujesz obsługi błędów (np. transakcje) */
+Effect.promise(async () => {
+	return await db.$transaction(async (tx) => {
+		/* ... */
+	});
+});
+```
+
+### 4. Effect.fail() - zwracanie błędu
+
+```typescript
+/* Zwracanie tagged error */
+if (!resource) {
+	return yield* Effect.fail(new ResourceNotFoundError({ resourceId }));
+}
+```
+
+### 5. Effect.mapError() - mapowanie błędów w handlerze ORPC
+
+```typescript
+/* Obsługa błędów JAWNIE w handlerze - każdy przypadek widoczny inline */
+await Effect.runPromise(
+	myEffect(input).pipe(
+		Effect.provide(DatabaseService(db)),
+		Effect.mapError((error) => {
+			if (error instanceof ResourceNotFoundError) {
+				return errors.NOT_FOUND({ message: error.publicMessage, cause: error });
+			}
+
+			return errors.INTERNAL_SERVER_ERROR({ cause: error });
+		}),
+	),
+);
+```
+
+## ⛔ Zakaz: Error mappers
+
+**Nie twórz osobnych plików/funkcji do mapowania błędów** (np. `mapResourceErrorToRouteError`, `*-error-mapper.ts`).
+
+Błędy muszą być obsługiwane **jawnie i widocznie w handlerze** – każdy przypadek w `Effect.mapError((error) => ...)` ma być inline w procedurze. Dzięki temu:
+- od razu widać, który błąd Effect mapuje na który błąd API,
+- nie ma ukrytej logiki w osobnym pliku,
+- łatwiej utrzymywać i review'ować.
+
+## Struktura plików
+
+```
+src/features/[domain]/
+├── repository.ts                    # tylko strzały do bazy danych
+├── errors.ts                        # tagged errors dla całej domeny (z publicMessage)
+├── service.ts                       # domyślne miejsce na logikę domenową / biznesową
+├── [domain-area].service.ts         # opcjonalny wyspecjalizowany serwis dla większej domeny
+└── procedures/
+    └── [feature].procedure.ts       # handler ORPC
+
+db/
+└── service.ts                       # Database / DatabaseService
+
+src/features/db/
+└── errors.ts                        # DatabaseError — wspólny błąd DB dla całego projektu
+```
+
+**Przykład:**
+```
+src/features/[domain]/
+├── repository.ts
+├── errors.ts
+├── service.ts
+├── offer-generation.service.ts
+└── procedures/
+    ├── get-resource.procedure.ts
+    └── create-resource.procedure.ts
+```
+
+## Wzorzec dla route'ów ORPC
+
+### 1. Definicja błędów w route (ORPC errors)
+
+```typescript
+export const myRoute = os
+	.$context<ClientContext>()
+	.errors({
+		/* Błędy API - to widzi klient */
+		NOT_FOUND: {},
+		RESOURCE_PROCESSING_ERROR: {
+			status: 422,
+			message: "Wystąpił błąd podczas przetwarzania zasobu",
+		},
+		INTERNAL_SERVER_ERROR: {}
+	})
+	.handler(async ({ input, context, errors }) => {
+		return await Effect.runPromise(
+			ResourceService.getResource({
+				resourceId: input.id,
+				userId: context.client?.id ?? null,
+			}).pipe(
+				Effect.provide(
+					Layer.mergeAll(
+						DatabaseService(db),
+						ResourceRepository.Default,
+						ResourceService.Default,
+					),
+				),
+				Effect.mapError((error) => {
+					if (error instanceof ResourceNotFoundError) {
+						return errors.NOT_FOUND({ message: error.publicMessage, cause: error });
+					}
+
+					if (error instanceof ResourceProcessingError) {
+						return errors.RESOURCE_PROCESSING_ERROR({ cause: error });
+					}
+
+					return errors.INTERNAL_SERVER_ERROR({ message: error.publicMessage, cause: error });
+				}),
+			),
+		);
+	});
+```
+
+### 2. Tagged errors dla domeny (Effect errors)
+
+```typescript
+/* src/features/[domain]/errors.ts */
+import { Data } from "effect";
+
+export class ResourceNotFoundError extends Data.TaggedError("ResourceNotFoundError")<{
+	resourceId: string;
+}> {
+	get publicMessage() {
+		return `Zasób o ID ${this.resourceId} nie został znaleziony`;
+	}
+}
+
+export class ResourceNameRequiredError extends Data.TaggedError("ResourceNameRequiredError")<{}> {
+	get publicMessage() {
+		return "Nazwa zasobu jest wymagana";
+	}
+}
+```
+
+Zasady tagowanych błędów:
+
+- **Jeden plik błędów per domena** — używaj `src/features/[domain]/errors.ts`, nigdy nie w pliku z logiką domenową / biznesową
+- **Minimalny, przydatny kontekst** — tylko pola potrzebne do debugowania (np. `resourceId`), nie nadmiarowe
+- **Pole `publicMessage`** — każdy błąd musi mieć getter `publicMessage` z czytelnym komunikatem po polsku
+- **Nie grupuj błędów w union type** — nie twórz `export type ResourceError = A | B | C`; każdy błąd jest oddzielną klasą eksportowaną samodzielnie
+- **Nie zawijaj wielu konkretnych błędów domenowych w jeden ogólny błąd** — np. nie mapuj `OrderNotFoundError` i `OrderHasNoDeliveryDateError` do wspólnego `OrderInvalidStateError`, jeśli to tylko techniczne opakowanie ukrywające prawdziwą przyczynę
+
+### 3. Logika biznesowa w serwisie
+
+```typescript
+/* src/features/[domain]/service.ts */
+const validateResourceOwnership = (params: {
+	resource: { userId: number | null };
+	userId: number | null;
+}) =>
+	Effect.gen(function* () {
+		if (params.userId === null || params.resource.userId !== params.userId) {
+			return yield* Effect.fail(
+				new ResourceOwnershipError({
+					resourceUserId: params.resource.userId,
+					userId: params.userId,
+				}),
+			);
+		}
+
+		return params.resource;
+	});
+
+const getResource = (params: {
+	resourceId: string;
+	userId: number | null;
+}) =>
+	Effect.gen(function* () {
+		const resourceRepository = yield* ResourceRepository;
+		const resource = yield* resourceRepository.findById(params.resourceId);
+
+		if (!resource) {
+			return yield* Effect.fail(new ResourceNotFoundError({ resourceId: params.resourceId }));
+		}
+
+		yield* validateResourceOwnership({ resource, userId: params.userId });
+
+		return {
+			id: resource.id,
+			status: resource.status,
+		};
+	});
+
+const createResource = (params: {
+	userId: number;
+	name: string;
+}) =>
+	Effect.gen(function* () {
+		const resourceClient = yield* ResourceClient;
+		const resourceRepository = yield* ResourceRepository;
+		const draft = yield* resourceClient.createDraft({
+			name: params.name,
+		});
+
+		return yield* resourceRepository.createFromDraft({
+			userId: params.userId,
+			externalId: draft.id,
+			name: params.name,
+		});
+	});
+
+export class ResourceService extends Effect.Service<ResourceService>()("ResourceService", {
+	succeed: {
+		getResource,
+		createResource,
+	},
+	accessors: true,
+}) {}
+```
+
+Zasady plików z logiką:
+
+- **Serwis jest domyślnym miejscem na logikę domenową / biznesową** — trzymaj ją w `src/features/[domain]/service.ts` albo w wyspecjalizowanym serwisie, np. `offer-generation.service.ts`
+- **Procedura ma być cienka** — `procedures/[feature].procedure.ts` powinno głównie definiować kontrakt ORPC i wołać accessor serwisu albo `repository`
+- **Bezpośrednie wywołanie `repository` z procedury jest OK w prostych przypadkach** — jeśli nie ma logiki domenowej, nie twórz serwisu na siłę
+- **Preferuj serwis jako `Effect.Service`** — jeśli domena ma kilka use-case'ów, grupuj je w klasie serwisu i udostępniaj przez accessors, np. `ResourceService.getResource(...)`
+- **Bez explicite return type** — TypeScript inferuje typ zwracany, nie pisz `: Effect.Effect<...>`
+- **Nazwy serwisów powinny opisywać domenę albo obszar odpowiedzialności** — używaj `service.ts` lub nazw typu `offer-generation.service.ts`
+- **Stałe bez przyrostka `Effect`** — `getResource`, `validateResource`, nie `getResourceEffect`
+
+### 4. Pomocnicze effecty w serwisie
+
+```typescript
+/* src/features/[domain]/offer-generation.service.ts */
+const validateResourceStatus = (resource: Resource) =>
+	Effect.gen(function* () {
+		if (resource.status !== ResourceStatus.active) {
+			return yield* Effect.fail(
+				new ResourceStatusError({
+					status: resource.status,
+					resourceId: resource.id,
+				}),
+			);
+		}
+		return resource;
+	});
+```
+
+## Serwisy (Effect Context / Layer)
+
+Serwisy to sposób na wstrzykiwanie zależności (np. klienta bazy danych) przez Effect Context. Używamy ich głównie do przekazywania instancji bazy danych — szczególnie przydatne przy transakcjach Prisma.
+
+Możesz tworzyć własne `service.ts` per feature, jeśli pomaga to uporządkować zależności domenowe. Preferowanym wzorcem dla większych domen jest serwis zbudowany przez `Effect.Service`, który grupuje kilka operacji biznesowych i udostępnia je przez accessors. Nie rób jednak z własnych `Layer`ów domyślnego wzorca — jeśli wystarczy istniejący `DatabaseService` albo prosty serwis domenowy, wybierz prostsze rozwiązanie.
+
+### Definicja serwisu domenowego
+
+```typescript
+/* src/features/[domain]/service.ts */
+const getResource = (params: { resourceId: string }) =>
+	Effect.gen(function* () {
+		const resourceRepository = yield* ResourceRepository;
+		const resource = yield* resourceRepository.findById(params.resourceId);
+
+		if (!resource) {
+			return yield* Effect.fail(new ResourceNotFoundError({ resourceId: params.resourceId }));
+		}
+
+		return resource;
+	});
+
+const createResource = (params: { name: string }) =>
+	Effect.gen(function* () {
+		if (!params.name.trim()) {
+			return yield* Effect.fail(new ResourceNameRequiredError());
+		}
+
+		const resourceClient = yield* ResourceClient;
+		const resourceRepository = yield* ResourceRepository;
+		const draft = yield* resourceClient.createDraft({ name: params.name });
+
+		return yield* resourceRepository.createFromDraft({
+			externalId: draft.id,
+			name: params.name,
+		});
+	});
+
+export class ResourceService extends Effect.Service<ResourceService>()("ResourceService", {
+	succeed: {
+		getResource,
+		createResource,
+	},
+	accessors: true,
+}) {}
+```
+
+### Definicja serwisu infrastrukturalnego
+
+```typescript
+/* db/service.ts */
+import { Context, Layer } from "effect";
+import type { DatabaseClient } from "db";
+
+/* Tag identyfikujący serwis w Context */
+export class Database extends Context.Tag("Database")<Database, DatabaseClient>() {}
+
+/* Factory tworząca Layer z dowolnym klientem (normalnym lub transakcyjnym) */
+export const DatabaseService = (client: DatabaseClient) => Layer.succeed(Database, client);
+```
+
+### Użycie zależności w serwisie
+
+```typescript
+/* W serwisie - pobierz zależności przez yield* */
+const getResource = (resourceId: string) =>
+	Effect.gen(function* () {
+		const resourceRepository = yield* ResourceRepository;
+		const resourceClient = yield* ResourceClient;
+		const draft = yield* resourceClient.getDraft(resourceId);
+
+		if (!draft) {
+			return yield* Effect.fail(new ResourceNotFoundError({ resourceId }));
+		}
+
+		return yield* resourceRepository.findByExternalId({
+			externalId: draft.id,
+		});
+	});
+```
+
+### Dostarczanie serwisu (provide)
+
+Jeśli dostarczasz **jedną** zależność, użyj `Effect.provide(DatabaseService(db))`. Jeśli dostarczasz **wiele** zależności, połącz je przez `Layer.mergeAll(...)` i dopiero wynik przekaż do `Effect.provide(...)`.
+
+```typescript
+/* W handlerze - dostarcz serwis przez Effect.provide */
+await Effect.runPromise(
+	ResourceService.getResource(input).pipe(
+		Effect.provide(
+			Layer.mergeAll(
+				DatabaseService(db),
+				ResourceRepository.Default,
+				ResourceService.Default,
+			),
+		),
+		Effect.mapError((error) => errors.INTERNAL_SERVER_ERROR({ cause: error })),
+	),
+);
+```
+
+```typescript
+/* Gdy potrzebujesz wielu serwisów, użyj Layer.mergeAll(...) */
+await Effect.runPromise(
+	ResourceService.createResource(input).pipe(
+		Effect.provide(
+			Layer.mergeAll(
+				DatabaseService(db),
+				ResourceClient.Default,
+				ResourceRepository.Default,
+				ResourceService.Default,
+			),
+		),
+		Effect.mapError((error) => errors.INTERNAL_SERVER_ERROR({ cause: error })),
+	),
+);
+```
+
+## Repository
+
+Każda domena powinna mieć plik `repository.ts` zawierający **wyłącznie** strzały do bazy danych — bez logiki biznesowej. Funkcje repository zawsze pobierają `db` z Effect Context (`yield* Database`).
+
+```
+src/features/[domain]/repository.ts
+```
+
+### Wzorzec repository
+
+```typescript
+/* src/features/[domain]/repository.ts */
+import { Effect } from "effect";
+import { Database } from "db/service";
+import { DatabaseError } from "src/features/db/errors.ts";
+
+export const listResourcesPaginated = (params: { skip: number; take: number }) =>
+	Effect.gen(function* () {
+		const db = yield* Database;
+
+		return yield* Effect.tryPromise({
+			try: () =>
+				paginate({
+					skip: params.skip,
+					take: params.take,
+					count: () => db.resource.count(),
+					query: (args) =>
+						db.resource.findMany({
+							skip: args.skip,
+							take: args.take,
+							orderBy: { createdAt: "desc" },
+						}),
+				}),
+			catch: (error) => new DatabaseError(error),
+		});
+	});
+
+export const findResourceById = (resourceId: string) =>
+	Effect.gen(function* () {
+		const db = yield* Database;
+
+		return yield* Effect.tryPromise({
+			try: () => db.resource.findUnique({ where: { id: resourceId } }),
+			catch: (error) => new DatabaseError(error),
+		});
+	});
+```
+
+### Zasady repository
+
+- **Tylko operacje DB** — żadnej logiki biznesowej, walidacji ani transformacji
+- **Tylko encje z domeny danego feature'a** — repository powinno zawierać wyłącznie operacje na encjach należących do tej samej domeny. Dozwolone są encje zależne w obrębie domeny (np. `Order` i `OrderItem`), ale nie mieszaj encji z innych domen (np. `Cart` i `Product`)
+- **Zawsze `yield* Database`** — nigdy nie importuj `db` bezpośrednio w repository
+- **`DatabaseError` z `src/features/db/errors`** — wszystkie błędy DB owijaj w `new DatabaseError(error)`, nie własne klasy
+- **Jeden plik per domena** — `src/features/[domain]/repository.ts`
+
+## Obsługa transakcji bazy danych
+
+### Opcja 1: Effect.provide z DatabaseService(tx) — zalecane gdy effect używa serwisu Database
+
+Gdy effect korzysta z `yield* Database` (np. przez repository), przekaż transakcyjny klient przez `Effect.provide(DatabaseService(tx))`. W procedurze mapuj błędy domenowe bezpośrednio przez `Effect.mapError(...)` przed `Effect.runPromise(...)`, żeby rollback i kontrakt API były obsłużone w jednym miejscu.
+
+```typescript
+/* Handler z transakcją i serwisem Database */
+export const myProcedure = os
+	.input(InputSchema)
+	.output(OutputSchema)
+	.errors({
+		RESOURCE_NOT_FOUND: { status: 404, message: "Zasób nie został znaleziony" },
+		VALIDATION_ERROR: { status: 422, message: "Błąd walidacji" },
+		INTERNAL_SERVER_ERROR: {},
+	})
+	.handler(async ({ input, errors }) => {
+		return await db.$transaction(async (tx) =>
+			await Effect.runPromise(
+				processResource(input).pipe(
+					Effect.provide(DatabaseService(tx)),
+					Effect.mapError((error) => {
+						if (error instanceof ResourceNotFoundError) {
+							return errors.RESOURCE_NOT_FOUND({ cause: error.resourceId });
+						}
+
+						if (error instanceof ValidationError) {
+							return errors.VALIDATION_ERROR({ cause: error.cause });
+						}
+
+						if (error instanceof ProcessingError) {
+							return errors.INTERNAL_SERVER_ERROR({ cause: error.cause });
+						}
+
+						return errors.INTERNAL_SERVER_ERROR({ cause: error });
+					}),
+				),
+			),
+		);
+	});
+```
+
+> **Dlaczego `pipe + mapError` przed `Effect.runPromise`?**
+> `Effect.runPromise(...)` odrzuci promise mapped errorem, więc `db.$transaction` wykona rollback. Dzięki temu nie trzeba używać `Effect.either` ani dodatkowej gałęzi `Either.isLeft(...)` w procedurze.
+
+### Opcja 2: Effect.promise (dla prostych przypadków bez serwisu Database)
+
+```typescript
+/* Gdy transakcja nie potrzebuje wstrzykiwania serwisu */
+const result = yield* Effect.promise(async () => {
+	return await db.$transaction(async (tx) => {
+		const validationEffect = validateResource({ db: tx });
+		return await Effect.runPromise(validationEffect);
+	});
+});
+```
+
+### Opcja 3: Effect.tryPromise (gdy chcesz łapać błędy transakcji)
+
+```typescript
+/* Gdy chcesz łapać błędy transakcji jako tagged error */
+const result = yield* Effect.tryPromise({
+	try: async () => {
+		return await db.$transaction(async (tx) => {
+			/* ... */
+		});
+	},
+	catch: (error) => new DatabaseError(error),
+});
+```
+
+## Effect.gen vs pipe - kiedy używać?
+
+### Effect.gen - do logiki biznesowej
+
+```typescript
+/* Deklaratywny, czytelny kod - używaj do głównej logiki */
+const getResource = (params) =>
+	Effect.gen(function* () {
+		const resource = yield* findResourceById(params.resourceId);
+		yield* validateResource(resource);
+		const items = yield* prepareItems(resource);
+		return { resource, items };
+	});
+```
+
+### pipe - do dostarczania serwisów i mapowania błędów w handlerach
+
+```typescript
+/* pipe używaj do Effect.provide i Effect.mapError w handlerach */
+export const myRoute = os
+	.handler(async ({ input, context, errors }) => {
+		return await Effect.runPromise(
+			ResourceService.getResource(input).pipe(
+				Effect.provide(
+					Layer.mergeAll(
+						DatabaseService(db),
+						ResourceRepository.Default,
+						ResourceService.Default,
+					),
+				),
+				Effect.mapError((error) => {
+					if (error instanceof ResourceNotFoundError) {
+						return errors.RESOURCE_NOT_FOUND({ cause: error.resourceId });
+					}
+
+					return errors.INTERNAL_SERVER_ERROR({ cause: error });
+				}),
+			),
+		);
+	});
+```
+
+## Pełny przykład: Resource route
+
+```typescript
+/* Route definition */
+export const getResourceRoute = os
+	.$context<OptionalClientContext>()
+	.input(InputSchema)
+	.output(OutputSchema)
+	.errors({
+		RESOURCE_NOT_FOUND: { status: 404, message: "Zasób nie został znaleziony" },
+		RESOURCE_INACTIVE: { status: 404, message: "Zasób jest nieaktywny" },
+		RESOURCE_PROCESSING_ERROR: { status: 422, message: "Błąd przetwarzania" },
+		USER_ID_NOT_PROVIDED: { status: 403, message: "Brak ID użytkownika" },
+		RESOURCE_AND_USER_NOT_MATCH: { status: 403, message: "Zasób nie należy do użytkownika" },
+	})
+	.handler(async ({ input, context, errors }) => {
+		return await Effect.runPromise(
+			ResourceService.getResource({
+				resourceId: input.id,
+				userId: context.user?.id ?? null,
+			}).pipe(
+				Effect.provide(
+					Layer.mergeAll(
+						DatabaseService(db),
+						ResourceRepository.Default,
+						ResourceService.Default,
+					),
+				),
+				Effect.mapError((error) => {
+					if (error instanceof ResourceNotFoundError) {
+						return errors.RESOURCE_NOT_FOUND({ cause: error.resourceId });
+					}
+
+					if (error instanceof ResourceOwnershipError) {
+						if (error.type === "no_user_id") {
+							return errors.USER_ID_NOT_PROVIDED({ cause: "..." });
+						}
+						return errors.RESOURCE_AND_USER_NOT_MATCH({ cause: "..." });
+					}
+
+					if (error instanceof ResourceStatusError) {
+						if (error.status === ResourceStatus.inactive) {
+							return errors.RESOURCE_INACTIVE({ cause: "..." });
+						}
+						return errors.RESOURCE_PROCESSING_ERROR({ cause: "..." });
+					}
+
+					return errors.RESOURCE_PROCESSING_ERROR({ cause: error });
+				}),
+			),
+		);
+	});
+```
+
+```typescript
+/* Service logic */
+const getResource = (params: {
+	resourceId: string;
+	userId: number | null;
+}) =>
+	Effect.gen(function* () {
+		const resourceRepository = yield* ResourceRepository;
+		const resource = yield* resourceRepository.findById(params.resourceId);
+
+		if (!resource) {
+			return yield* Effect.fail(new ResourceNotFoundError({ resourceId: params.resourceId }));
+		}
+
+		yield* validateResourceOwnership({ resource, userId: params.userId });
+		yield* validateResourceStatus(resource);
+
+		const items = yield* prepareAndValidateResourceItems(resource);
+		const metadata = yield* aggregateMetadata({ items, config: resource.config });
+
+		return { id: resource.id, items, metadata };
+	});
+
+export class ResourceService extends Effect.Service<ResourceService>()("ResourceService", {
+	succeed: {
+		getResource,
+	},
+	accessors: true,
+}) {}
+```
+
+## Best Practices
+
+### ✅ TAK
+
+1. **Dla prostej domeny wystarczy `service.ts`, dla większej użyj wyspecjalizowanego `*.service.ts`** - np. `service.ts`, `offer-generation.service.ts`
+2. **Serwis to domyślne miejsce na logikę domenową** - używaj `service.ts` albo wyspecjalizowanego serwisu, np. `offer-generation.service.ts`
+3. **Dla większych domen preferuj `Effect.Service`** - grupuj operacje biznesowe w jednym serwisie i wywołuj je przez accessors, np. `ResourceService.getResource(...)`
+4. **Tagged errors w jednym pliku domeny** - `src/features/[domain]/errors.ts`, nie w plikach z logiką
+5. **Każdy błąd ma `publicMessage`** — getter z czytelnym komunikatem po polsku
+6. **Minimalny, przydatny kontekst błędu** — tylko pola potrzebne do debugowania, bez nadmiarowych
+7. **Effect.gen dla logiki** - czytelny, deklaratywny kod
+8. **Obsługa błędów inline w handlerze** - mapuj błędy bezpośrednio w procedurze przez `Effect.mapError((error) => errors.X(...))`
+9. **`Effect.mapError` w procedurach ORPC** - mapuj błędy domenowe bezpośrednio do `errors.X(...)` inline w handlerze
+10. **Niespodziewane błędy → generyczny błąd API** - domyślnie mapuj je do `INTERNAL_SERVER_ERROR` z `cause: error`; osobny błąd typu `RESOURCE_PROCESSING_ERROR` dodawaj tylko wtedy, gdy naprawdę opisuje specyficzny kontrakt API
+11. **Z transakcją** - w `db.$transaction`: `pipe + mapError` + `Effect.provide(...)` przed `Effect.runPromise`; przy wielu serwisach użyj `Layer.mergeAll(...)`
+12. **Bez transakcji** - `Effect.runPromise(effect.pipe(Effect.provide(...), Effect.mapError(...)))`
+13. **Procedura zwykle woła `service` albo `repository`** - nie trzymaj logiki domenowej w handlerze, jeśli może żyć w serwisie
+14. **Najpierw sprawdź istniejące rozwiązania** - zanim dodasz nowy effect, repository, procedurę, błąd lub helper, przeszukaj codebase i upewnij się, że podobne rozwiązanie nie istnieje już w tej samej domenie albo w innym feature'ze
+15. **Repository** - jeden plik `repository.ts` per domena, tylko operacje DB, zawsze `yield* Database`
+16. **Serwisy / provide** - dla jednej zależności użyj `Effect.provide(DatabaseService(client))`, a dla wielu `Effect.provide(Layer.mergeAll(...))`
+17. **`DatabaseError` z `src/features/db/errors`** — jedyny błąd używany w `catch` wewnątrz repository
+
+### ❌ NIE
+
+1. **Nie twórz własnych Layerów bez wyraźnej potrzeby** - własne `service.ts` per feature są dozwolone, ale nie rób z własnych `Layer`ów domyślnego wzorca, jeśli wystarczy `DatabaseService` albo prostszy serwis domenowy
+2. **Nie mieszaj Effect.gen i pipe** w tej samej funkcji - wybierz jedno
+3. **Nie twórz error mapperów** - żadnych `mapXErrorToRouteError`, `*-error-mapper.ts`; obsługa błędów tylko inline w handlerze
+4. **Nie używaj `Effect.either` w procedurach ORPC** - preferuj `Effect.mapError(...)` inline w handlerze
+5. **Nie używaj Effect wszędzie** - tylko tam gdzie ma sens
+6. **Nie importuj `db` bezpośrednio w repository** - zawsze `yield* Database`
+7. **Nie umieszczaj logiki biznesowej w repository** - tylko operacje DB
+8. **Nie pisz explicite return type dla operacji serwisowych opartych o Effect** — TypeScript inferuje typ, `: Effect.Effect<...>` jest zbędne
+9. **Nie pakuj logiki domenowej do procedury, jeśli może żyć w serwisie** — handler ma być cienki i zwykle wołać `service` albo `repository`
+10. **Nie definiuj union type dla błędów domeny** — nie twórz `export type ResourceError = A | B | C`; każda klasa błędu jest samodzielna
+11. **Nie zawijaj wielu różnych błędów domenowych w jeden ogólny błąd pośredni** — np. nie opakowuj `OrderNotFoundError` i `OrderHasNoDeliveryDateError` w `OrderInvalidStateError`, jeśli handler może obsłużyć te przypadki jawnie
+12. **Nie umieszczaj klas błędów w plikach z logiką domenową / biznesową** — wyłącznie w `src/features/[domain]/errors.ts`
+13. **Nie używaj własnych klas błędów w `catch` repository** — zawsze `new DatabaseError(error)` z `src/features/db/errors.ts`
+
+## Konwencje nazewnictwa
+
+- **Service operations**: `[action][Resource]` - `getResource`, `validateResourceOwnership`, `createResource`
+- **Error classes**: `[Resource][Action]Error` - `ResourceNotFoundError`, `ResourceStatusError`
+- **Error files**: `errors.ts` per feature - `src/features/[domain]/errors.ts`
+- **Repository functions**: opisowe nazwy operacji - `listResourcesPaginated`, `findResourceById`, `createResource`
+- **Procedure files**: `[feature].procedure.ts` - `get-resource.procedure.ts`
+- **Service files**: `service.ts` albo `[domain-area].service.ts` - `service.ts`, `offer-generation.service.ts`
+- **Service classes**: `[Domain]Service` - `ResourceService`, `AuthologicService`
+
+## Migracja istniejącego kodu
+
+Jeśli refactorujesz istniejący endpoint:
+
+1. Stwórz `errors.ts` z tagged errors (każda klasa z `publicMessage`, bez union type)
+2. Stwórz `repository.ts` z operacjami DB (używaj `yield* Database`, `DatabaseError` z `src/features/db/errors.ts`)
+3. Stwórz `service.ts` albo wyspecjalizowany `*.service.ts` z główną logiką domenową; dla większych domen preferuj `Effect.Service`
+4. Stwórz lub zaktualizuj `procedures/[feature].procedure.ts` jako cienki handler ORPC, który woła accessor serwisu albo `repository`
+5. Zaktualizuj handler:
+   - bez transakcji → `Effect.runPromise(effect.pipe(Effect.provide(...), Effect.mapError(...)))`; przy wielu zależnościach użyj `Layer.mergeAll(...)`
+   - z transakcją → wewnątrz `db.$transaction` użyj `pipe + mapError` + `Effect.provide(...)` przed `Effect.runPromise`; przy wielu zależnościach użyj `Layer.mergeAll(...)`
+
+## FAQ
+
+**Q: Czy muszę używać Effect dla każdego route'a?**
+A: Nie, to indywidualna decyzja. Używaj gdzie przynosi wartość.
+
+**Q: Co z async/await?**
+A: Wewnątrz Effect.gen używasz `yield*`, nie `await`. Na końcu uruchamiasz przez `Effect.runPromise()`.
+
+**Q: Jak testować Effect code?**
+A: Używaj `Effect.runPromise()` w testach lub `Effect.runSync()` dla synchronicznego kodu.
+
+**Q: Co jeśli mam błąd który nie jest obsłużony w switch?**
+A: Jeśli nie potrzebujesz osobnego kontraktu API dla tego przypadku, potraktuj go jak ogólny błąd i zmapuj do `INTERNAL_SERVER_ERROR` z `cause: error`. Osobny błąd typu `RESOURCE_PROCESSING_ERROR` dodawaj tylko wtedy, gdy ma sens biznesowy i jest częścią kontraktu API.
