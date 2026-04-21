@@ -53,7 +53,7 @@ export default function EditRouteForm({ routeId }: { routeId: string }) {
 			client.routes.recalculateRoute({
 				routeId,
 				waypoints: params.waypoints,
-				profile: "cycling",
+				profile: "gravel_bike",
 				persist: true,
 				confirmDeleteOldest: params.confirmDeleteOldest ?? false,
 			}),

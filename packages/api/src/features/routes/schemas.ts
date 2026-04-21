@@ -69,7 +69,16 @@ export const RouteWaypointSchema = z.object({
 
 export const RecalculateRouteInputSchema = z.object({
 	routeId: z.string().min(1),
-	profile: z.enum(["cycling", "driving", "walking"]).default("cycling"),
+	profile: z
+		.enum([
+			"runner",
+			"road_bike",
+			"gravel_bike",
+			"cycling",
+			"driving",
+			"walking",
+		])
+		.default("gravel_bike"),
 	waypoints: z.array(RouteWaypointSchema).min(2),
 	persist: z.boolean().default(false),
 	confirmDeleteOldest: z.boolean().default(false),

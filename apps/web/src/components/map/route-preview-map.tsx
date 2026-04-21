@@ -379,7 +379,7 @@ export default function RoutePreviewMap({
 			client.routes.recalculateRoute({
 				routeId,
 				waypoints: draftWaypoints,
-				profile: "cycling",
+				profile: "gravel_bike",
 				persist: false,
 			}),
 		onSuccess: (data) => {

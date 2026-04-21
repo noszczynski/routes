@@ -9,6 +9,7 @@ import {
 	RouteVersionLimitReachedError,
 	RouteVersionNotFoundError,
 	RoutingEngineError,
+	RoutingEngineNotConfiguredError,
 } from "../errors";
 import { RecalculateRouteInputSchema } from "../schemas";
 import { recalculateRoute } from "../service";
@@ -57,6 +58,10 @@ export const recalculateRouteProcedure = protectedProcedure
 		ROUTING_ENGINE_ERROR: {
 			status: 502,
 			message: "Silnik routingu jest chwilowo niedostępny",
+		},
+		ROUTING_ENGINE_NOT_CONFIGURED: {
+			status: 503,
+			message: "Przeliczanie trasy jest chwilowo niedostępne",
 		},
 		ROUTING_ENGINE_TIMEOUT: {
 			status: 504,
@@ -124,6 +129,12 @@ export const recalculateRouteProcedure = protectedProcedure
 						}
 
 						return errors.ROUTING_ENGINE_ERROR({
+							message: error.publicMessage,
+						});
+					}
+
+					if (error instanceof RoutingEngineNotConfiguredError) {
+						return errors.ROUTING_ENGINE_NOT_CONFIGURED({
 							message: error.publicMessage,
 						});
 					}

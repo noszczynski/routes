@@ -12,6 +12,7 @@
 		"check-types": "turbo check-types",
 		"dev:web": "turbo -F web dev",
 		"dev:server": "turbo -F server dev",
+		"dev:routing-engine": "turbo run dev --filter=routing-engine",
 		"db:push": "turbo -F @routes/db db:push",
 		"db:studio": "turbo -F @routes/db db:studio",
 		"db:generate": "turbo -F @routes/db db:generate",

@@ -1,0 +1,11 @@
+{
+	"extends": ["//"],
+	"tasks": {
+		"build": {
+			"outputs": ["src/**/__pycache__/**"]
+		},
+		"check-types": {
+			"outputs": ["src/**/__pycache__/**"]
+		}
+	}
+}

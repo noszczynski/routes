@@ -1,0 +1,6 @@
+[project]
+name = "routing-engine"
+version = "0.1.0"
+description = "Prototype OSM routing engine for routes"
+requires-python = ">=3.11"
+dependencies = []

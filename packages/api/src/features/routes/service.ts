@@ -15,6 +15,7 @@ import {
 	RouteVersionLimitReachedError,
 	RouteVersionNotFoundError,
 	RoutingEngineError,
+	RoutingEngineNotConfiguredError,
 } from "./errors";
 import {
 	countRouteVersionsByRouteId,
@@ -51,7 +52,8 @@ export type RouteWaypoint = {
 	lon: number;
 };
 
-type RoutingProfile = "cycling" | "driving" | "walking";
+type RoutingProfile = "runner" | "road_bike" | "gravel_bike";
+type RoutingProfileInput = RoutingProfile | "cycling" | "driving" | "walking";
 
 type ParsedRouteData = {
 	gpxContent: string;
@@ -382,24 +384,19 @@ const calculateMetrics = (points: ParsedPoint[]) => {
 	};
 };
 
+const routingProfileAliases = {
+	runner: "runner",
+	road_bike: "road_bike",
+	gravel_bike: "gravel_bike",
+	walking: "runner",
+	driving: "road_bike",
+	cycling: "gravel_bike",
+} as const satisfies Record<RoutingProfileInput, RoutingProfile>;
+
 const resolveRoutingProfile = (
-	profile: RoutingProfile | undefined,
-): RoutingProfile => {
-	if (profile) {
-		return profile;
-	}
-
-	const defaultProfile = env.ROUTING_DEFAULT_PROFILE;
-	if (
-		defaultProfile === "cycling" ||
-		defaultProfile === "driving" ||
-		defaultProfile === "walking"
-	) {
-		return defaultProfile;
-	}
-
-	return "cycling";
-};
+	profile: RoutingProfileInput | undefined,
+): RoutingProfile =>
+	routingProfileAliases[profile ?? env.ROUTING_DEFAULT_PROFILE];
 
 const toRoundedWaypoints = (waypoints: RouteWaypoint[]) =>
 	waypoints.map((waypoint) => ({
@@ -407,105 +404,87 @@ const toRoundedWaypoints = (waypoints: RouteWaypoint[]) =>
 		lon: round(waypoint.lon, 6),
 	}));
 
-const buildOsrmRequestUrl = (params: {
-	baseUrl: string;
-	profile: RoutingProfile;
-	waypoints: RouteWaypoint[];
-}) => {
-	const coordinates = params.waypoints
-		.map((point) => `${point.lon.toFixed(6)},${point.lat.toFixed(6)}`)
-		.join(";");
-	const query = new URLSearchParams({
-		overview: "full",
-		geometries: "geojson",
-		steps: "false",
-	});
-	return `${params.baseUrl}/route/v1/${params.profile}/${coordinates}?${query.toString()}`;
-};
-
-const routeCoordinatesToGpx = (coordinates: number[][]) => {
-	const trkPoints = coordinates
-		.map((coordinate) => {
-			const [lon, lat] = coordinate;
-
-			if (
-				lat === undefined ||
-				lon === undefined ||
-				!Number.isFinite(lat) ||
-				!Number.isFinite(lon)
-			) {
-				return "";
-			}
-
-			return `<trkpt lat="${lat.toFixed(6)}" lon="${lon.toFixed(6)}"></trkpt>`;
-		})
-		.filter(Boolean)
-		.join("");
-
-	if (!trkPoints) {
-		throw new Error("Route did not return valid coordinates");
+const readRoutingEngineError = async (response: Response) => {
+	const bodyText = await response.text();
+	if (!bodyText) {
+		return `Routing engine request failed with status ${response.status}`;
 	}
 
-	return `<?xml version="1.0" encoding="UTF-8"?><gpx version="1.1" creator="routes" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Rerouted track</name><trkseg>${trkPoints}</trkseg></trk></gpx>`;
+	try {
+		const body = JSON.parse(bodyText) as { error?: unknown };
+		if (typeof body.error === "string" && body.error.trim()) {
+			return `Routing engine request failed with status ${response.status}: ${body.error}`;
+		}
+	} catch {
+		// Ignore JSON parse errors and fall back to raw response text.
+	}
+
+	return `Routing engine request failed with status ${response.status}: ${bodyText}`;
 };
 
-const fetchReroutedGpxFromOsrm = (params: {
-	profile?: RoutingProfile;
+const fetchReroutedGpxFromRoutingEngine = (params: {
+	profile?: RoutingProfileInput;
 	waypoints: RouteWaypoint[];
 }) =>
-	Effect.tryPromise({
-		try: async () => {
-			const roundedWaypoints = toRoundedWaypoints(params.waypoints);
-			const routingEngineBaseUrl = env.ROUTING_ENGINE_URL?.replace(/\/+$/, "");
-			const applicationBaseUrl = env.BETTER_AUTH_URL.replace(/\/+$/, "");
+	Effect.gen(function* () {
+		const roundedWaypoints = toRoundedWaypoints(params.waypoints);
+		const routingEngineBaseUrl = env.ROUTING_ENGINE_URL?.replace(/\/+$/, "");
+		const applicationBaseUrl = env.BETTER_AUTH_URL.replace(/\/+$/, "");
 
-			if (!routingEngineBaseUrl) {
-				throw new Error("ROUTING_ENGINE_URL is not configured");
-			}
+		console.log("routingEngineBaseUrl", routingEngineBaseUrl);
+		console.log("applicationBaseUrl", applicationBaseUrl);
 
-			if (routingEngineBaseUrl === applicationBaseUrl) {
-				throw new Error(
-					"ROUTING_ENGINE_URL points to application URL instead of routing engine",
-				);
-			}
+		if (!routingEngineBaseUrl) {
+			return yield* Effect.fail(
+				new RoutingEngineNotConfiguredError({ reason: "missing_url" }),
+			);
+		}
 
-			const profile = resolveRoutingProfile(params.profile);
-			const requestUrl = buildOsrmRequestUrl({
-				baseUrl: routingEngineBaseUrl,
-				profile,
-				waypoints: roundedWaypoints,
-			});
-			const controller = new AbortController();
-			const timeout = setTimeout(() => controller.abort(), 10_000);
+		if (routingEngineBaseUrl === applicationBaseUrl) {
+			return yield* Effect.fail(
+				new RoutingEngineNotConfiguredError({ reason: "invalid_url" }),
+			);
+		}
 
-			try {
-				const response = await fetch(requestUrl, {
-					signal: controller.signal,
-				});
+		const profile = resolveRoutingProfile(params.profile);
+		const reroutedGpx = yield* Effect.tryPromise({
+			try: async () => {
+				const controller = new AbortController();
+				const timeout = setTimeout(() => controller.abort(), 10_000);
 
-				if (!response.ok) {
-					throw new Error(`OSRM request failed with status ${response.status}`);
+				try {
+					const response = await fetch(`${routingEngineBaseUrl}/route`, {
+						method: "POST",
+						headers: {
+							"Content-Type": "application/json",
+						},
+						body: JSON.stringify({
+							profile,
+							waypoints: roundedWaypoints,
+						}),
+						signal: controller.signal,
+					});
+
+					if (!response.ok) {
+						throw new Error(await readRoutingEngineError(response));
+					}
+
+					const body = (await response.json()) as {
+						gpx?: unknown;
+					};
+					if (typeof body.gpx !== "string" || body.gpx.trim().length === 0) {
+						throw new Error("Routing engine did not return GPX content");
+					}
+
+					return body.gpx;
+				} finally {
+					clearTimeout(timeout);
 				}
+			},
+			catch: (cause) => new RoutingEngineError({ cause }),
+		});
 
-				const body = (await response.json()) as {
-					routes?: Array<{
-						geometry?: {
-							coordinates?: number[][];
-						};
-					}>;
-				};
-				const coordinates = body.routes?.[0]?.geometry?.coordinates ?? [];
-
-				if (coordinates.length < 2) {
-					throw new Error("OSRM returned too few coordinates");
-				}
-
-				return routeCoordinatesToGpx(coordinates);
-			} finally {
-				clearTimeout(timeout);
-			}
-		},
-		catch: (cause) => new RoutingEngineError({ cause }),
+		return reroutedGpx;
 	});
 
 const parseGpx = (gpxContent: string) =>
@@ -1015,7 +994,7 @@ export const recalculateRoute = (params: {
 	routeId: string;
 	userId: string;
 	waypoints: RouteWaypoint[];
-	profile?: RoutingProfile;
+	profile?: RoutingProfileInput;
 	persist?: boolean;
 	confirmDeleteOldest?: boolean;
 }) =>
@@ -1045,7 +1024,7 @@ export const recalculateRoute = (params: {
 			catch: (cause) => new GpxParseError({ cause }),
 		});
 
-		const reroutedGpx = yield* fetchReroutedGpxFromOsrm({
+		const reroutedGpx = yield* fetchReroutedGpxFromRoutingEngine({
 			profile: params.profile,
 			waypoints: params.waypoints,
 		});

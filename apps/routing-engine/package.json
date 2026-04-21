@@ -1,0 +1,10 @@
+{
+	"name": "routing-engine",
+	"private": true,
+	"scripts": {
+		"dev": "PYTHONPATH=src python3 -m routing_engine",
+		"start": "PYTHONPATH=src python3 -m routing_engine",
+		"build": "python3 -m compileall -q src",
+		"check-types": "python3 -m compileall -q src"
+	}
+}

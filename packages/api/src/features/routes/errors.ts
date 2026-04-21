@@ -51,6 +51,18 @@ export class RoutingEngineError extends Data.TaggedError("RoutingEngineError")<{
 	}
 }
 
+export class RoutingEngineNotConfiguredError extends Data.TaggedError(
+	"RoutingEngineNotConfiguredError",
+)<{
+	reason: "missing_url" | "invalid_url";
+}> {
+	get publicMessage() {
+		return this.reason === "missing_url"
+			? "Przeliczanie trasy jest chwilowo niedostępne, bo silnik routingu nie jest skonfigurowany"
+			: "Przeliczanie trasy jest chwilowo niedostępne z powodu błędnej konfiguracji silnika routingu";
+	}
+}
+
 export class RouteVersionNotFoundError extends Data.TaggedError(
 	"RouteVersionNotFoundError",
 	// biome-ignore lint/complexity/noBannedTypes: Effect TaggedError uses empty payload marker.

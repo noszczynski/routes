@@ -2,6 +2,8 @@
 
 This project was created with [Better-T-Stack](https://github.com/AmanVarshney01/create-better-t-stack), a modern TypeScript stack that combines Next.js, Hono, ORPC, and more.
 
+It also contains a separate Python routing engine in `apps/routing-engine`, available by default on port `5000`.
+
 ## Features
 
 - **TypeScript** - For type safety and improved developer experience
@@ -47,6 +49,22 @@ pnpm run dev
 Open [http://localhost:3001](http://localhost:3001) in your browser to see the web application.
 The API is running at [http://localhost:3000](http://localhost:3000).
 
+## Routing Engine Setup
+
+The route recalculation flow now calls the Python routing engine from `apps/routing-engine`.
+
+1. Download an OpenStreetMap extract from [Geofabrik](https://download.geofabrik.de/).
+2. Set `ROUTING_ENGINE_URL=http://127.0.0.1:5000` in `apps/server/.env`.
+3. Set `ROUTING_ENGINE_OSM_PATH` before starting the Python app, for example:
+
+```bash
+cd apps/routing-engine
+export ROUTING_ENGINE_OSM_PATH="$PWD/data/poland-latest.osm.pbf"
+PYTHONPATH=src python3 -m routing_engine
+```
+
+`GET /health` returns the current graph status and whether the engine is ready to serve routes.
+
 ## UI Customization
 
 React web apps in this stack share shadcn/ui primitives through `packages/ui`.
@@ -82,8 +100,9 @@ If you want to add app-specific blocks instead of shared primitives, run the sha
 ```
 routes/
 ├── apps/
-│   ├── web/         # Frontend application (Next.js)
-│   └── server/      # Backend API (Hono, ORPC)
+│   ├── web/             # Frontend application (Next.js)
+│   ├── server/          # Backend API (Hono, ORPC)
+│   └── routing-engine/  # Python OSM routing engine
 ├── packages/
 │   ├── ui/          # Shared shadcn/ui components and styles
 │   ├── api/         # API layer / business logic
@@ -97,6 +116,7 @@ routes/
 - `pnpm run build`: Build all applications
 - `pnpm run dev:web`: Start only the web application
 - `pnpm run dev:server`: Start only the server
+- `pnpm run dev:routing-engine`: Start only the Python routing engine
 - `pnpm run check-types`: Check TypeScript types across all apps
 - `pnpm run db:push`: Push schema changes to database
 - `pnpm run db:generate`: Generate database client/types
