@@ -9,6 +9,8 @@ model User {
   sessions          Session[]
   accounts          Account[]
   routes            Route[]
+  routeVotes        RouteVote[]
+  routeComments     RouteComment[]
   stravaConnections StravaConnection[]
 
   @@map("users")

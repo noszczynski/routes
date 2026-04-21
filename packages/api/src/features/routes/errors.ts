@@ -23,3 +23,27 @@ export class GpxParseError extends Data.TaggedError("GpxParseError")<{
 		return "Nie udało się odczytać pliku GPX";
 	}
 }
+
+export class RouteCommentParentNotFoundError extends Data.TaggedError(
+	"RouteCommentParentNotFoundError",
+)<{}> {
+	get publicMessage() {
+		return "Komentarz nadrzędny nie istnieje";
+	}
+}
+
+export class RouteCommentParentMismatchError extends Data.TaggedError(
+	"RouteCommentParentMismatchError",
+)<{}> {
+	get publicMessage() {
+		return "Nieprawidłowy komentarz nadrzędny dla tej trasy";
+	}
+}
+
+export class RoutingEngineError extends Data.TaggedError("RoutingEngineError")<{
+	cause: unknown;
+}> {
+	get publicMessage() {
+		return "Nie udało się przeliczyć trasy po drogach";
+	}
+}

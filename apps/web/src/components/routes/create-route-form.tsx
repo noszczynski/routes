@@ -8,6 +8,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "@routes/ui/components/card";
+import { Checkbox } from "@routes/ui/components/checkbox";
 import { Input } from "@routes/ui/components/input";
 import { Label } from "@routes/ui/components/label";
 import { Textarea } from "@routes/ui/components/textarea";
@@ -25,6 +26,7 @@ export default function CreateRouteForm() {
 	const [title, setTitle] = useState("");
 	const [description, setDescription] = useState("");
 	const [file, setFile] = useState<File | null>(null);
+	const [isPublic, setIsPublic] = useState(false);
 
 	const createRoute = useMutation({
 		mutationFn: async () => {
@@ -41,6 +43,7 @@ export default function CreateRouteForm() {
 			return client.routes.createRoute({
 				title,
 				description,
+				isPublic,
 				gpxContent,
 			});
 		},
@@ -59,7 +62,7 @@ export default function CreateRouteForm() {
 				<CardHeader>
 					<CardTitle>Dodaj trasę</CardTitle>
 					<CardDescription>
-						Wgraj plik GPX i opublikuj trasę na mapie.
+						Wgraj plik GPX i zdecyduj, czy trasa ma być publiczna.
 					</CardDescription>
 				</CardHeader>
 				<CardContent>
@@ -105,6 +108,22 @@ export default function CreateRouteForm() {
 							<p className="text-muted-foreground text-xs">
 								Maksymalny rozmiar pliku: 5 MB.
 							</p>
+						</div>
+
+						<div className="flex items-start gap-3">
+							<Checkbox
+								id="route-public"
+								checked={isPublic}
+								onCheckedChange={(checked) => setIsPublic(checked === true)}
+							/>
+							<div className="grid gap-1.5 leading-none">
+								<Label htmlFor="route-public">
+									Czy chcesz upublicznić tę trasę?
+								</Label>
+								<p className="text-muted-foreground text-xs">
+									Domyślnie trasa jest prywatna i widoczna tylko dla Ciebie.
+								</p>
+							</div>
 						</div>
 
 						<div className="flex gap-3">

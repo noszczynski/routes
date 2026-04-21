@@ -12,6 +12,10 @@ export const env = createEnv({
 		STRAVA_CLIENT_SECRET: z.string().min(1).optional(),
 		STRAVA_REDIRECT_URI: z.string().min(1).optional(),
 		GPX_UPLOADS_DIR: z.string().default("./uploads"),
+		ROUTING_ENGINE_URL: z.url().optional(),
+		ROUTING_DEFAULT_PROFILE: z
+			.enum(["cycling", "driving", "walking"])
+			.default("cycling"),
 		NODE_ENV: z
 			.enum(["development", "production", "test"])
 			.default("development"),

@@ -1,13 +1,13 @@
 import { Effect } from "effect";
 
-import { publicProcedure } from "../../../index";
+import { protectedProcedure } from "../../../index";
 import { DatabaseError } from "../../db/errors";
 import { RouteNotFoundError } from "../errors";
-import { GetRouteInputSchema } from "../schemas";
-import { getRoute } from "../service";
+import { RateRouteInputSchema } from "../schemas";
+import { rateRoute } from "../service";
 
-export const getRouteProcedure = publicProcedure
-	.input(GetRouteInputSchema)
+export const rateRouteProcedure = protectedProcedure
+	.input(RateRouteInputSchema)
 	.errors({
 		NOT_FOUND: {
 			status: 404,
@@ -17,9 +17,10 @@ export const getRouteProcedure = publicProcedure
 	})
 	.handler(async ({ input, context, errors }) => {
 		return await Effect.runPromise(
-			getRoute({
-				routeId: input.id,
-				userId: context.session?.user?.id,
+			rateRoute({
+				routeId: input.routeId,
+				userId: context.session.user.id,
+				value: input.value,
 			}).pipe(
 				Effect.mapError((error) => {
 					if (error instanceof RouteNotFoundError) {

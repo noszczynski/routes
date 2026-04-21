@@ -1,29 +1,41 @@
 import { Effect } from "effect";
 
-import { publicProcedure } from "../../../index";
+import { protectedProcedure } from "../../../index";
 import { DatabaseError } from "../../db/errors";
-import { RouteNotFoundError } from "../errors";
-import { GetRouteInputSchema } from "../schemas";
-import { getRoute } from "../service";
+import { RouteNotFoundError, RouteOwnershipError } from "../errors";
+import { UpdateRoutePrivacyInputSchema } from "../schemas";
+import { updateRoutePrivacy } from "../service";
 
-export const getRouteProcedure = publicProcedure
-	.input(GetRouteInputSchema)
+export const updateRoutePrivacyProcedure = protectedProcedure
+	.input(UpdateRoutePrivacyInputSchema)
 	.errors({
 		NOT_FOUND: {
 			status: 404,
 			message: "Trasa nie została znaleziona",
 		},
+		FORBIDDEN: {
+			status: 403,
+			message: "Nie możesz zmienić prywatności tej trasy",
+		},
 		INTERNAL_SERVER_ERROR: {},
 	})
 	.handler(async ({ input, context, errors }) => {
 		return await Effect.runPromise(
-			getRoute({
-				routeId: input.id,
-				userId: context.session?.user?.id,
+			updateRoutePrivacy({
+				routeId: input.routeId,
+				userId: context.session.user.id,
+				isPublic: input.isPublic,
 			}).pipe(
 				Effect.mapError((error) => {
 					if (error instanceof RouteNotFoundError) {
 						return errors.NOT_FOUND({
+							message: error.publicMessage,
+							cause: error,
+						});
+					}
+
+					if (error instanceof RouteOwnershipError) {
+						return errors.FORBIDDEN({
 							message: error.publicMessage,
 							cause: error,
 						});

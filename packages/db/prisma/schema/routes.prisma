@@ -2,6 +2,7 @@ model Route {
   id            String   @id @default(cuid())
   title         String
   description   String?
+  isPublic      Boolean  @default(false) @map("is_public")
   distance      Float?
   elevationGain Float?   @map("elevation_gain")
   elevationLoss Float?   @map("elevation_loss")
@@ -15,10 +16,52 @@ model Route {
   sourceReference String? @map("source_reference")
   userId        String   @map("user_id")
   user          User     @relation(fields: [userId], references: [id], onDelete: Cascade, map: "routes_user_id_fkey")
+  votes         RouteVote[]
+  comments      RouteComment[]
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
 
   @@index([userId], map: "routes_user_id_idx")
   @@unique([userId, sourceReference], map: "routes_user_id_source_reference_key")
   @@map("routes")
+}
+
+enum RouteVoteValue {
+  up
+  down
+}
+
+model RouteVote {
+  id        String         @id @default(cuid())
+  routeId   String         @map("route_id")
+  route     Route          @relation(fields: [routeId], references: [id], onDelete: Cascade, map: "route_votes_route_id_fkey")
+  userId    String         @map("user_id")
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade, map: "route_votes_user_id_fkey")
+  value     RouteVoteValue
+  createdAt DateTime       @default(now()) @map("created_at")
+  updatedAt DateTime       @updatedAt @map("updated_at")
+
+  @@unique([routeId, userId], map: "route_votes_route_id_user_id_key")
+  @@index([routeId], map: "route_votes_route_id_idx")
+  @@index([userId], map: "route_votes_user_id_idx")
+  @@map("route_votes")
+}
+
+model RouteComment {
+  id        String         @id @default(cuid())
+  routeId   String         @map("route_id")
+  route     Route          @relation(fields: [routeId], references: [id], onDelete: Cascade, map: "route_comments_route_id_fkey")
+  userId    String         @map("user_id")
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade, map: "route_comments_user_id_fkey")
+  parentId  String?        @map("parent_id")
+  parent    RouteComment?  @relation("RouteCommentReplies", fields: [parentId], references: [id], onDelete: Cascade, map: "route_comments_parent_id_fkey")
+  replies   RouteComment[] @relation("RouteCommentReplies")
+  content   String
+  createdAt DateTime       @default(now()) @map("created_at")
+  updatedAt DateTime       @updatedAt @map("updated_at")
+
+  @@index([routeId], map: "route_comments_route_id_idx")
+  @@index([userId], map: "route_comments_user_id_idx")
+  @@index([parentId], map: "route_comments_parent_id_idx")
+  @@map("route_comments")
 }

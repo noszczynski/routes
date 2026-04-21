@@ -1,4 +1,4 @@
-import { mkdir, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { env } from "@routes/env/server";
 import { gpx as gpxToGeoJson } from "@tmcw/togeojson";
@@ -8,16 +8,28 @@ import { XMLParser } from "fast-xml-parser";
 
 import {
 	GpxParseError,
+	RoutingEngineError,
+	RouteCommentParentMismatchError,
+	RouteCommentParentNotFoundError,
 	RouteNotFoundError,
 	RouteOwnershipError,
 } from "./errors";
 import {
+	countRouteVotes,
+	createRouteComment,
 	createRouteRecord,
+	deleteRouteVote,
 	deleteRouteById,
+	findRouteCommentById,
 	findRouteById,
+	findRouteVoteByUser,
 	findRouteBySourceReference,
 	listRoutesByUserId,
+	listRouteCommentsByRouteId,
 	listRoutesInBbox,
+	updateRouteMetricsById,
+	updateRoutePrivacyById,
+	upsertRouteVote,
 } from "./repository";
 
 type ParsedPoint = {
@@ -25,6 +37,13 @@ type ParsedPoint = {
 	lon: number;
 	ele: number | undefined;
 };
+
+export type RouteWaypoint = {
+	lat: number;
+	lon: number;
+};
+
+type RoutingProfile = "cycling" | "driving" | "walking";
 
 type ParsedRouteData = {
 	gpxContent: string;
@@ -49,6 +68,7 @@ type RouteRecord = {
 	id: string;
 	title: string;
 	description: string | null;
+	isPublic: boolean;
 	distance: number | null;
 	elevationGain: number | null;
 	elevationLoss: number | null;
@@ -64,6 +84,32 @@ type RouteRecord = {
 	};
 	createdAt: Date;
 	updatedAt: Date;
+};
+
+type RouteCommentRecord = {
+	id: string;
+	routeId: string;
+	parentId: string | null;
+	content: string;
+	userId: string;
+	user: {
+		id: string;
+		name: string;
+	};
+	createdAt: Date;
+	updatedAt: Date;
+};
+
+export type RouteCommentNode = {
+	id: string;
+	routeId: string;
+	parentCommentId: string | null;
+	content: string;
+	authorId: string;
+	authorName: string;
+	createdAt: Date;
+	updatedAt: Date;
+	replies: RouteCommentNode[];
 };
 
 const xmlParser = new XMLParser({
@@ -308,6 +354,132 @@ const calculateMetrics = (points: ParsedPoint[]) => {
 	};
 };
 
+const resolveRoutingProfile = (
+	profile: RoutingProfile | undefined,
+): RoutingProfile => {
+	if (profile) {
+		return profile;
+	}
+
+	const defaultProfile = env.ROUTING_DEFAULT_PROFILE;
+	if (
+		defaultProfile === "cycling" ||
+		defaultProfile === "driving" ||
+		defaultProfile === "walking"
+	) {
+		return defaultProfile;
+	}
+
+	return "cycling";
+};
+
+const toRoundedWaypoints = (waypoints: RouteWaypoint[]) =>
+	waypoints.map((waypoint) => ({
+		lat: round(waypoint.lat, 6),
+		lon: round(waypoint.lon, 6),
+	}));
+
+const buildOsrmRequestUrl = (params: {
+	baseUrl: string;
+	profile: RoutingProfile;
+	waypoints: RouteWaypoint[];
+}) => {
+	const coordinates = params.waypoints
+		.map((point) => `${point.lon.toFixed(6)},${point.lat.toFixed(6)}`)
+		.join(";");
+	const query = new URLSearchParams({
+		overview: "full",
+		geometries: "geojson",
+		steps: "false",
+	});
+	return `${params.baseUrl}/route/v1/${params.profile}/${coordinates}?${query.toString()}`;
+};
+
+const waypointsToCoordinates = (waypoints: RouteWaypoint[]) =>
+	waypoints.map((waypoint) => [waypoint.lon, waypoint.lat]);
+
+const routeCoordinatesToGpx = (coordinates: number[][]) => {
+	const trkPoints = coordinates
+		.map((coordinate) => {
+			const [lon, lat] = coordinate;
+
+			if (
+				lat === undefined ||
+				lon === undefined ||
+				!Number.isFinite(lat) ||
+				!Number.isFinite(lon)
+			) {
+				return "";
+			}
+
+			return `<trkpt lat="${lat.toFixed(6)}" lon="${lon.toFixed(6)}"></trkpt>`;
+		})
+		.filter(Boolean)
+		.join("");
+
+	if (!trkPoints) {
+		throw new Error("Route did not return valid coordinates");
+	}
+
+	return `<?xml version="1.0" encoding="UTF-8"?><gpx version="1.1" creator="routes" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Rerouted track</name><trkseg>${trkPoints}</trkseg></trk></gpx>`;
+};
+
+const fetchReroutedGpxFromOsrm = (params: {
+	profile?: RoutingProfile;
+	waypoints: RouteWaypoint[];
+}) =>
+	Effect.tryPromise({
+		try: async () => {
+			const roundedWaypoints = toRoundedWaypoints(params.waypoints);
+			const routingEngineBaseUrl = env.ROUTING_ENGINE_URL?.replace(/\/+$/, "");
+			const applicationBaseUrl = env.BETTER_AUTH_URL.replace(/\/+$/, "");
+
+			if (
+				!routingEngineBaseUrl ||
+				routingEngineBaseUrl === applicationBaseUrl
+			) {
+				return routeCoordinatesToGpx(waypointsToCoordinates(roundedWaypoints));
+			}
+
+			const profile = resolveRoutingProfile(params.profile);
+			const requestUrl = buildOsrmRequestUrl({
+				baseUrl: routingEngineBaseUrl,
+				profile,
+				waypoints: roundedWaypoints,
+			});
+			const controller = new AbortController();
+			const timeout = setTimeout(() => controller.abort(), 10_000);
+
+			try {
+				const response = await fetch(requestUrl, {
+					signal: controller.signal,
+				});
+
+				if (!response.ok) {
+					throw new Error(`OSRM request failed with status ${response.status}`);
+				}
+
+				const body = (await response.json()) as {
+					routes?: Array<{
+						geometry?: {
+							coordinates?: number[][];
+						};
+					}>;
+				};
+				const coordinates = body.routes?.[0]?.geometry?.coordinates ?? [];
+
+				if (coordinates.length < 2) {
+					throw new Error("OSRM returned too few coordinates");
+				}
+
+				return routeCoordinatesToGpx(coordinates);
+			} finally {
+				clearTimeout(timeout);
+			}
+		},
+		catch: (cause) => new RoutingEngineError({ cause }),
+	});
+
 const parseGpx = (gpxContent: string) =>
 	Effect.try({
 		try: () => {
@@ -431,6 +603,7 @@ const toRouteSummary = (route: RouteRecord) => ({
 	id: route.id,
 	title: route.title,
 	description: route.description,
+	isPublic: route.isPublic,
 	distance: route.distance,
 	elevationGain: route.elevationGain,
 	elevationLoss: route.elevationLoss,
@@ -445,6 +618,85 @@ const toRouteSummary = (route: RouteRecord) => ({
 	createdAt: route.createdAt,
 	updatedAt: route.updatedAt,
 });
+
+const toRouteComment = (comment: RouteCommentRecord): RouteCommentNode => ({
+	id: comment.id,
+	routeId: comment.routeId,
+	parentCommentId: comment.parentId,
+	content: comment.content,
+	authorId: comment.userId,
+	authorName: comment.user.name,
+	createdAt: comment.createdAt,
+	updatedAt: comment.updatedAt,
+	replies: [],
+});
+
+const buildCommentsTree = (comments: RouteCommentRecord[]): RouteCommentNode[] => {
+	const commentMap = new Map(
+		comments.map((comment) => [comment.id, toRouteComment(comment)]),
+	);
+	const roots: RouteCommentNode[] = [];
+
+	for (const comment of comments) {
+		const node = commentMap.get(comment.id);
+		if (!node) {
+			continue;
+		}
+
+		if (!comment.parentId) {
+			roots.push(node);
+			continue;
+		}
+
+		const parent = commentMap.get(comment.parentId);
+		if (!parent) {
+			roots.push(node);
+			continue;
+		}
+
+		parent.replies.push(node);
+	}
+
+	return roots;
+};
+
+const getRouteRating = (params: { routeId: string; userId?: string }) =>
+	Effect.gen(function* () {
+		const groupedVotes = yield* countRouteVotes(params.routeId);
+		const userVote = params.userId
+			? yield* findRouteVoteByUser({
+					routeId: params.routeId,
+					userId: params.userId,
+				})
+			: null;
+
+		let upvotes = 0;
+		let downvotes = 0;
+
+		for (const vote of groupedVotes) {
+			if (vote.value === "up") {
+				upvotes = vote._count._all;
+				continue;
+			}
+
+			downvotes = vote._count._all;
+		}
+
+		const myVote =
+			userVote?.value === "up" ? "up" : userVote?.value === "down" ? "down" : null;
+
+		return {
+			upvotes,
+			downvotes,
+			myVote,
+		};
+	});
+
+const getRouteComments = (routeId: string) =>
+	Effect.gen(function* () {
+		const comments = yield* listRouteCommentsByRouteId(routeId);
+		return buildCommentsTree(comments);
+	});
 
 export const listRoutes = (params: {
 	bbox?: {
@@ -480,24 +732,35 @@ export const listRoutes = (params: {
 		return routes.map(toRouteSummary);
 	});
 
-export const getRoute = (routeId: string) =>
+export const getRoute = (params: { routeId: string; userId?: string }) =>
 	Effect.gen(function* () {
-		const route = yield* findRouteById(routeId);
+		const route = yield* findRouteById(params.routeId);
 
 		if (!route) {
-			return yield* Effect.fail(new RouteNotFoundError({ routeId }));
+			return yield* Effect.fail(
+				new RouteNotFoundError({ routeId: params.routeId }),
+			);
 		}
+
+		const rating = yield* getRouteRating({
+			routeId: route.id,
+			userId: params.userId,
+		});
+		const comments = yield* getRouteComments(route.id);
 
 		return {
 			...toRouteSummary(route),
 			source: route.source,
 			sourceReference: route.sourceReference,
+			rating,
+			comments,
 		};
 	});
 
 export const createRoute = (params: {
 	title: string;
 	description?: string;
+	isPublic?: boolean;
 	gpxContent: string;
 	userId: string;
 	source?: "manual" | "strava";
@@ -519,6 +782,7 @@ export const createRoute = (params: {
 		const createdRoute = yield* createRouteRecord({
 			title: params.title,
 			description: params.description,
+			isPublic: params.isPublic,
 			userId: params.userId,
 			source: params.source,
 			sourceReference: params.sourceReference,
@@ -574,4 +838,169 @@ export const deleteRoute = (params: { routeId: string; userId: string }) =>
 			id: params.routeId,
 			deleted: true,
 		};
+	});
+
+export const rateRoute = (params: {
+	routeId: string;
+	userId: string;
+	value: "up" | "down" | null;
+}) =>
+	Effect.gen(function* () {
+		const route = yield* findRouteById(params.routeId);
+
+		if (!route) {
+			return yield* Effect.fail(
+				new RouteNotFoundError({ routeId: params.routeId }),
+			);
+		}
+
+		if (params.value === null) {
+			yield* deleteRouteVote({
+				routeId: params.routeId,
+				userId: params.userId,
+			});
+		} else {
+			yield* upsertRouteVote({
+				routeId: params.routeId,
+				userId: params.userId,
+				value: params.value,
+			});
+		}
+
+		return yield* getRouteRating({
+			routeId: params.routeId,
+			userId: params.userId,
+		});
+	});
+
+export const addRouteComment = (params: {
+	routeId: string;
+	userId: string;
+	content: string;
+	parentCommentId?: string;
+}) =>
+	Effect.gen(function* () {
+		const route = yield* findRouteById(params.routeId);
+
+		if (!route) {
+			return yield* Effect.fail(
+				new RouteNotFoundError({ routeId: params.routeId }),
+			);
+		}
+
+		if (params.parentCommentId) {
+			const parentComment = yield* findRouteCommentById(params.parentCommentId);
+
+			if (!parentComment) {
+				return yield* Effect.fail(new RouteCommentParentNotFoundError());
+			}
+
+			if (parentComment.routeId !== params.routeId) {
+				return yield* Effect.fail(new RouteCommentParentMismatchError());
+			}
+		}
+
+		const createdComment = yield* createRouteComment({
+			routeId: params.routeId,
+			userId: params.userId,
+			parentId: params.parentCommentId,
+			content: params.content,
+		});
+
+		return toRouteComment(createdComment);
+	});
+
+export const recalculateRoute = (params: {
+	routeId: string;
+	userId: string;
+	waypoints: RouteWaypoint[];
+	profile?: RoutingProfile;
+	persist?: boolean;
+}) =>
+	Effect.gen(function* () {
+		const route = yield* findRouteById(params.routeId);
+
+		if (!route) {
+			return yield* Effect.fail(
+				new RouteNotFoundError({ routeId: params.routeId }),
+			);
+		}
+
+		if (route.userId !== params.userId) {
+			return yield* Effect.fail(new RouteOwnershipError());
+		}
+
+		// Ensure source GPX file exists before allowing recalculation.
+		yield* Effect.tryPromise({
+			try: () =>
+				readFile(
+					getGpxFilePath({
+						routeId: params.routeId,
+						userId: route.userId,
+					}),
+					"utf8",
+				),
+			catch: (cause) => new GpxParseError({ cause }),
+		});
+
+		const reroutedGpx = yield* fetchReroutedGpxFromOsrm({
+			profile: params.profile,
+			waypoints: params.waypoints,
+		});
+		const parsedRoute = yield* parseGpx(reroutedGpx);
+
+		if (!params.persist) {
+			return {
+				route: {
+					...toRouteSummary(route),
+					...parsedRoute.metrics,
+				},
+				geoJson: parsedRoute.geoJson,
+				gpxContent: parsedRoute.gpxContent,
+			};
+		}
+
+		yield* writeRouteFiles({
+			routeId: route.id,
+			userId: route.userId,
+			gpxContent: parsedRoute.gpxContent,
+			geoJson: parsedRoute.geoJson,
+		});
+
+		const updatedRoute = yield* updateRouteMetricsById({
+			routeId: route.id,
+			...parsedRoute.metrics,
+		});
+
+		return {
+			route: toRouteSummary(updatedRoute),
+			geoJson: parsedRoute.geoJson,
+			gpxContent: parsedRoute.gpxContent,
+		};
+	});
+
+export const updateRoutePrivacy = (params: {
+	routeId: string;
+	userId: string;
+	isPublic: boolean;
+}) =>
+	Effect.gen(function* () {
+		const route = yield* findRouteById(params.routeId);
+
+		if (!route) {
+			return yield* Effect.fail(
+				new RouteNotFoundError({ routeId: params.routeId }),
+			);
+		}
+
+		if (route.userId !== params.userId) {
+			return yield* Effect.fail(new RouteOwnershipError());
+		}
+
+		const updatedRoute = yield* updateRoutePrivacyById({
+			routeId: params.routeId,
+			isPublic: params.isPublic,
+		});
+
+		return toRouteSummary(updatedRoute);
 	});
