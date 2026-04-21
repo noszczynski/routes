@@ -8,20 +8,38 @@ const routeSelect = {
 	title: true,
 	description: true,
 	isPublic: true,
-	distance: true,
-	elevationGain: true,
-	elevationLoss: true,
-	minElevation: true,
-	maxElevation: true,
-	bboxNorth: true,
-	bboxSouth: true,
-	bboxEast: true,
-	bboxWest: true,
 	source: true,
 	sourceReference: true,
+	mainVersionId: true,
 	userId: true,
 	createdAt: true,
 	updatedAt: true,
+	mainVersion: {
+		select: {
+			id: true,
+			sourceType: true,
+			originalFileName: true,
+			gpxFileName: true,
+			geoJsonFileName: true,
+			versionOrder: true,
+			distance: true,
+			elevationGain: true,
+			elevationLoss: true,
+			minElevation: true,
+			maxElevation: true,
+			bboxNorth: true,
+			bboxSouth: true,
+			bboxEast: true,
+			bboxWest: true,
+			createdAt: true,
+			updatedAt: true,
+		},
+	},
+	_count: {
+		select: {
+			versions: true,
+		},
+	},
 	user: {
 		select: {
 			id: true,
@@ -44,6 +62,27 @@ const routeCommentSelect = {
 			name: true,
 		},
 	},
+} as const;
+
+const routeVersionSelect = {
+	id: true,
+	routeId: true,
+	sourceType: true,
+	originalFileName: true,
+	gpxFileName: true,
+	geoJsonFileName: true,
+	versionOrder: true,
+	distance: true,
+	elevationGain: true,
+	elevationLoss: true,
+	minElevation: true,
+	maxElevation: true,
+	bboxNorth: true,
+	bboxSouth: true,
+	bboxEast: true,
+	bboxWest: true,
+	createdAt: true,
+	updatedAt: true,
 } as const;
 
 export const findRouteById = (routeId: string) =>
@@ -91,8 +130,7 @@ export const listRoutesInBbox = (params: {
 	};
 }) =>
 	Effect.gen(function* () {
-		const where = {
-			isPublic: true,
+		const mainVersionFilters = {
 			...(params.bbox
 				? {
 						bboxNorth: { not: null, gte: params.bbox.south },
@@ -129,6 +167,13 @@ export const listRoutesInBbox = (params: {
 				: {}),
 		};
 
+		const where = {
+			isPublic: true,
+			mainVersion: {
+				is: mainVersionFilters,
+			},
+		};
+
 		return yield* Effect.tryPromise({
 			try: () =>
 				prisma.route.findMany({
@@ -158,15 +203,6 @@ export const createRouteRecord = (params: {
 	description?: string;
 	isPublic?: boolean;
 	userId: string;
-	distance?: number;
-	elevationGain?: number;
-	elevationLoss?: number;
-	minElevation?: number;
-	maxElevation?: number;
-	bboxNorth?: number;
-	bboxSouth?: number;
-	bboxEast?: number;
-	bboxWest?: number;
 	source?: string;
 	sourceReference?: string;
 }) =>
@@ -179,15 +215,6 @@ export const createRouteRecord = (params: {
 						description: params.description,
 						isPublic: params.isPublic,
 						userId: params.userId,
-						distance: params.distance,
-						elevationGain: params.elevationGain,
-						elevationLoss: params.elevationLoss,
-						minElevation: params.minElevation,
-						maxElevation: params.maxElevation,
-						bboxNorth: params.bboxNorth,
-						bboxSouth: params.bboxSouth,
-						bboxEast: params.bboxEast,
-						bboxWest: params.bboxWest,
 						source: params.source,
 						sourceReference: params.sourceReference,
 					},
@@ -209,7 +236,10 @@ export const deleteRouteById = (routeId: string) =>
 		});
 	});
 
-export const findRouteVoteByUser = (params: { routeId: string; userId: string }) =>
+export const findRouteVoteByUser = (params: {
+	routeId: string;
+	userId: string;
+}) =>
 	Effect.gen(function* () {
 		return yield* Effect.tryPromise({
 			try: () =>
@@ -351,8 +381,26 @@ export const updateRoutePrivacyById = (params: {
 		});
 	});
 
-export const updateRouteMetricsById = (params: {
+export const listRouteVersionsByRouteId = (routeId: string) =>
+	Effect.gen(function* () {
+		return yield* Effect.tryPromise({
+			try: () =>
+				prisma.routeVersion.findMany({
+					where: { routeId },
+					orderBy: { createdAt: "desc" },
+					select: routeVersionSelect,
+				}),
+			catch: (cause) => new DatabaseError({ cause }),
+		});
+	});
+
+export const createRouteVersionRecord = (params: {
 	routeId: string;
+	sourceType: "edit" | "upload";
+	originalFileName?: string;
+	gpxFileName: string;
+	geoJsonFileName: string;
+	versionOrder: number;
 	distance?: number;
 	elevationGain?: number;
 	elevationLoss?: number;
@@ -366,9 +414,14 @@ export const updateRouteMetricsById = (params: {
 	Effect.gen(function* () {
 		return yield* Effect.tryPromise({
 			try: () =>
-				prisma.route.update({
-					where: { id: params.routeId },
+				prisma.routeVersion.create({
 					data: {
+						routeId: params.routeId,
+						sourceType: params.sourceType,
+						originalFileName: params.originalFileName,
+						gpxFileName: params.gpxFileName,
+						geoJsonFileName: params.geoJsonFileName,
+						versionOrder: params.versionOrder,
 						distance: params.distance,
 						elevationGain: params.elevationGain,
 						elevationLoss: params.elevationLoss,
@@ -379,7 +432,74 @@ export const updateRouteMetricsById = (params: {
 						bboxEast: params.bboxEast,
 						bboxWest: params.bboxWest,
 					},
+					select: routeVersionSelect,
+				}),
+			catch: (cause) => new DatabaseError({ cause }),
+		});
+	});
+
+export const setRouteMainVersionById = (params: {
+	routeId: string;
+	mainVersionId: string;
+}) =>
+	Effect.gen(function* () {
+		return yield* Effect.tryPromise({
+			try: () =>
+				prisma.route.update({
+					where: { id: params.routeId },
+					data: { mainVersionId: params.mainVersionId },
 					select: routeSelect,
+				}),
+			catch: (cause) => new DatabaseError({ cause }),
+		});
+	});
+
+export const findRouteVersionById = (params: {
+	routeId: string;
+	versionId: string;
+}) =>
+	Effect.gen(function* () {
+		return yield* Effect.tryPromise({
+			try: () =>
+				prisma.routeVersion.findFirst({
+					where: {
+						id: params.versionId,
+						routeId: params.routeId,
+					},
+					select: routeVersionSelect,
+				}),
+			catch: (cause) => new DatabaseError({ cause }),
+		});
+	});
+
+export const countRouteVersionsByRouteId = (routeId: string) =>
+	Effect.gen(function* () {
+		return yield* Effect.tryPromise({
+			try: () => prisma.routeVersion.count({ where: { routeId } }),
+			catch: (cause) => new DatabaseError({ cause }),
+		});
+	});
+
+export const findOldestRouteVersionByRouteId = (routeId: string) =>
+	Effect.gen(function* () {
+		return yield* Effect.tryPromise({
+			try: () =>
+				prisma.routeVersion.findFirst({
+					where: { routeId },
+					orderBy: { createdAt: "asc" },
+					select: routeVersionSelect,
+				}),
+			catch: (cause) => new DatabaseError({ cause }),
+		});
+	});
+
+export const deleteRouteVersionById = (versionId: string) =>
+	Effect.gen(function* () {
+		return yield* Effect.tryPromise({
+			try: () =>
+				prisma.routeVersion.delete({
+					where: { id: versionId },
+					select: routeVersionSelect,
 				}),
 			catch: (cause) => new DatabaseError({ cause }),
 		});

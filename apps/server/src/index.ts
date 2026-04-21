@@ -6,13 +6,12 @@ import { RPCHandler } from "@orpc/server/fetch";
 import { ZodToJsonSchemaConverter } from "@orpc/zod/zod4";
 import { createContext } from "@routes/api/context";
 import {
-	getGeoJsonFilePath,
-	getGpxFileName,
-	getGpxFilePath,
+	getRouteVersionGeoJsonFilePath,
+	getRouteVersionGpxFilePath,
 } from "@routes/api/features/routes/service";
 import { appRouter } from "@routes/api/routers/index";
-import { prisma } from "@routes/db";
 import { auth } from "@routes/auth";
+import { prisma } from "@routes/db";
 import { env } from "@routes/env/server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -107,10 +106,28 @@ const serveRouteFile = async (params: {
 
 app.get("/files/geojson/:id", async (c) => {
 	const id = c.req.param("id");
+	const route = await prisma.route.findUnique({
+		where: { id },
+		select: {
+			mainVersion: {
+				select: {
+					geoJsonFileName: true,
+				},
+			},
+		},
+	});
+
+	if (!route?.mainVersion) {
+		return c.notFound();
+	}
+
 	const fileResponse = await serveRouteFile({
 		id,
 		contentType: "application/geo+json; charset=utf-8",
-		filePath: getGeoJsonFilePath(id, env.GPX_UPLOADS_DIR),
+		filePath: getRouteVersionGeoJsonFilePath(
+			route.mainVersion.geoJsonFileName,
+			env.GPX_UPLOADS_DIR,
+		),
 	});
 
 	if (!fileResponse) {
@@ -122,23 +139,39 @@ app.get("/files/geojson/:id", async (c) => {
 
 app.get("/files/gpx/:id", async (c) => {
 	const id = c.req.param("id");
+	const versionId = c.req.query("versionId");
+	const selectedVersion = versionId
+		? await prisma.routeVersion.findFirst({
+				where: {
+					id: versionId,
+					routeId: id,
+				},
+				select: {
+					gpxFileName: true,
+				},
+			})
+		: null;
 	const route = await prisma.route.findUnique({
 		where: { id },
-		select: { userId: true },
+		select: {
+			mainVersion: {
+				select: {
+					gpxFileName: true,
+				},
+			},
+		},
 	});
 
-	if (!route) {
+	if (!route?.mainVersion) {
 		return c.notFound();
 	}
 
-	const gpxFileName = getGpxFileName({ routeId: id, userId: route.userId });
+	const gpxFileName =
+		selectedVersion?.gpxFileName ?? route.mainVersion.gpxFileName;
 	const fileResponse = await serveRouteFile({
 		id,
 		contentType: "application/gpx+xml; charset=utf-8",
-		filePath: getGpxFilePath(
-			{ routeId: id, userId: route.userId },
-			env.GPX_UPLOADS_DIR,
-		),
+		filePath: getRouteVersionGpxFilePath(gpxFileName, env.GPX_UPLOADS_DIR),
 		contentDisposition: `attachment; filename="${gpxFileName}"`,
 	});
 

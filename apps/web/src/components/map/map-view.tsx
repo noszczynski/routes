@@ -12,6 +12,7 @@ import { MapContainer, TileLayer, useMapEvents } from "react-leaflet";
 import { orpc } from "@/utils/orpc";
 
 import MapFilters from "./map-filters";
+import MapInteractionEnhancer from "./map-interaction-enhancer";
 import RouteHoverPanel from "./route-hover-panel";
 import RouteLayer from "./route-layer";
 
@@ -100,10 +101,20 @@ export default function MapView() {
 				zoom={POLAND_ZOOM}
 				className="h-full w-full"
 				preferCanvas
+				scrollWheelZoom="center"
+				keyboard
+				dragging
+				doubleClickZoom
+				boxZoom
+				touchZoom
 			>
 				<TileLayer
 					attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 					url={`https://{s}.basemaps.cartocdn.com/${tileLayerVariant}/{z}/{x}/{y}{r}.png`}
+				/>
+				<MapInteractionEnhancer
+					initialCenter={POLAND_CENTER}
+					initialZoom={POLAND_ZOOM}
 				/>
 				<MapBoundsListener
 					onBoundsChange={setBbox}

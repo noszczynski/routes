@@ -10,6 +10,7 @@ export class RouteNotFoundError extends Data.TaggedError("RouteNotFoundError")<{
 
 export class RouteOwnershipError extends Data.TaggedError(
 	"RouteOwnershipError",
+	// biome-ignore lint/complexity/noBannedTypes: Effect TaggedError uses empty payload marker.
 )<{}> {
 	get publicMessage() {
 		return "Nie masz uprawnień do tej trasy";
@@ -26,6 +27,7 @@ export class GpxParseError extends Data.TaggedError("GpxParseError")<{
 
 export class RouteCommentParentNotFoundError extends Data.TaggedError(
 	"RouteCommentParentNotFoundError",
+	// biome-ignore lint/complexity/noBannedTypes: Effect TaggedError uses empty payload marker.
 )<{}> {
 	get publicMessage() {
 		return "Komentarz nadrzędny nie istnieje";
@@ -34,6 +36,7 @@ export class RouteCommentParentNotFoundError extends Data.TaggedError(
 
 export class RouteCommentParentMismatchError extends Data.TaggedError(
 	"RouteCommentParentMismatchError",
+	// biome-ignore lint/complexity/noBannedTypes: Effect TaggedError uses empty payload marker.
 )<{}> {
 	get publicMessage() {
 		return "Nieprawidłowy komentarz nadrzędny dla tej trasy";
@@ -45,5 +48,24 @@ export class RoutingEngineError extends Data.TaggedError("RoutingEngineError")<{
 }> {
 	get publicMessage() {
 		return "Nie udało się przeliczyć trasy po drogach";
+	}
+}
+
+export class RouteVersionNotFoundError extends Data.TaggedError(
+	"RouteVersionNotFoundError",
+	// biome-ignore lint/complexity/noBannedTypes: Effect TaggedError uses empty payload marker.
+)<{}> {
+	get publicMessage() {
+		return "Wybrana wersja trasy nie istnieje";
+	}
+}
+
+export class RouteVersionLimitReachedError extends Data.TaggedError(
+	"RouteVersionLimitReachedError",
+)<{
+	limit: number;
+}> {
+	get publicMessage() {
+		return `Osiągnięto limit ${this.limit} wersji trasy. Usuń najstarszą wersję, aby zapisać nową.`;
 	}
 }

@@ -21,12 +21,14 @@ import "leaflet/dist/leaflet.css";
 
 import { client } from "@/utils/orpc";
 
+import MapInteractionEnhancer from "./map-interaction-enhancer";
+
 const POLAND_CENTER: [number, number] = [52, 19];
 const POLAND_ZOOM = 6;
-const MIN_TURN_DISTANCE_METERS = 120;
-const MAX_SEGMENT_LENGTH_METERS = 1500;
-const TURN_THRESHOLD_DEGREES = 25;
-const MAX_EDITABLE_WAYPOINTS = 24;
+const MIN_TURN_DISTANCE_METERS = 80;
+const MAX_SEGMENT_LENGTH_METERS = 900;
+const TURN_THRESHOLD_DEGREES = 18;
+const MAX_EDITABLE_WAYPOINTS = 36;
 
 type GeoJsonFeatureCollection = {
 	type: "FeatureCollection";
@@ -44,6 +46,14 @@ export type RouteWaypoint = {
 	lat: number;
 	lon: number;
 };
+
+type EditableWaypoint = RouteWaypoint & {
+	id: string;
+};
+
+const toRouteWaypoints = (
+	editableWaypoints: EditableWaypoint[],
+): RouteWaypoint[] => editableWaypoints.map(({ lat, lon }) => ({ lat, lon }));
 
 const START_ICON = L.divIcon({
 	className: "route-editor-marker",
@@ -77,20 +87,6 @@ const getWaypointIcon = (index: number, total: number) => {
 
 	return VIA_ICON;
 };
-
-const toLineGeoJson = (waypoints: RouteWaypoint[]): GeoJsonFeatureCollection => ({
-	type: "FeatureCollection",
-	features: [
-		{
-			type: "Feature",
-			properties: {},
-			geometry: {
-				type: "LineString",
-				coordinates: waypoints.map((waypoint) => [waypoint.lon, waypoint.lat]),
-			},
-		},
-	],
-});
 
 const extractLineCoordinates = (geoJson: GeoJsonFeatureCollection) => {
 	for (const feature of geoJson.features ?? []) {
@@ -252,6 +248,16 @@ function RouteEditMapClickHandler({
 				return;
 			}
 
+			const clickTarget = event.originalEvent.target;
+			if (
+				clickTarget instanceof HTMLElement &&
+				clickTarget.closest(
+					".leaflet-marker-icon, .leaflet-popup, .leaflet-control, button, a",
+				)
+			) {
+				return;
+			}
+
 			onAddVia({
 				lat: Number(event.latlng.lat.toFixed(6)),
 				lon: Number(event.latlng.lng.toFixed(6)),
@@ -287,6 +293,7 @@ export default function RoutePreviewMap({
 	editMode = false,
 	dataVersion,
 	onDraftChange,
+	className,
 }: {
 	routeId: string;
 	bbox?: {
@@ -302,18 +309,21 @@ export default function RoutePreviewMap({
 		hasChanges: boolean;
 		isCalculating: boolean;
 	}) => void;
+	className?: string;
 }) {
 	const { resolvedTheme } = useTheme();
 	const [geoJson, setGeoJson] = useState<GeoJsonFeatureCollection | null>(null);
-	const [draftGeoJson, setDraftGeoJson] = useState<GeoJsonFeatureCollection | null>(
-		null,
-	);
-	const [waypoints, setWaypoints] = useState<RouteWaypoint[]>([]);
+	const [draftGeoJson, setDraftGeoJson] =
+		useState<GeoJsonFeatureCollection | null>(null);
+	const [waypoints, setWaypoints] = useState<EditableWaypoint[]>([]);
 	const [hasWaypointChanges, setHasWaypointChanges] = useState(false);
 	const lastRequestedWaypointKeyRef = useRef<string | null>(null);
+	const waypointIdCounterRef = useRef(0);
 	const tileLayerVariant = resolvedTheme === "light" ? "light_all" : "dark_all";
 
 	useEffect(() => {
+		// Trigger refetch after persisted edits even when routeId stays the same.
+		void dataVersion;
 		const controller = new AbortController();
 
 		void fetch(`${env.NEXT_PUBLIC_SERVER_URL}/files/geojson/${routeId}`, {
@@ -332,6 +342,7 @@ export default function RoutePreviewMap({
 				setWaypoints([]);
 				setHasWaypointChanges(false);
 				lastRequestedWaypointKeyRef.current = null;
+				waypointIdCounterRef.current = 0;
 			})
 			.catch((error) => {
 				if (error instanceof Error && error.name === "AbortError") {
@@ -349,11 +360,18 @@ export default function RoutePreviewMap({
 			return;
 		}
 
-		const initialWaypoints = toEditableWaypoints(geoJson);
+		const initialWaypoints = toEditableWaypoints(geoJson).map(
+			(waypoint, index) => ({
+				id: `wp-${index + 1}`,
+				lat: waypoint.lat,
+				lon: waypoint.lon,
+			}),
+		);
 		setWaypoints(initialWaypoints);
 		setDraftGeoJson(geoJson);
 		setHasWaypointChanges(false);
 		lastRequestedWaypointKeyRef.current = null;
+		waypointIdCounterRef.current = initialWaypoints.length;
 	}, [editMode, geoJson]);
 
 	const recalculateDraftMutation = useMutation({
@@ -373,13 +391,13 @@ export default function RoutePreviewMap({
 	});
 
 	const waypointSignature = useMemo(
-		() => JSON.stringify(waypoints),
+		() => JSON.stringify(toRouteWaypoints(waypoints)),
 		[waypoints],
 	);
 
 	useEffect(() => {
 		onDraftChange?.({
-			waypoints,
+			waypoints: toRouteWaypoints(waypoints),
 			hasChanges: hasWaypointChanges,
 			isCalculating: recalculateDraftMutation.isPending,
 		});
@@ -403,7 +421,7 @@ export default function RoutePreviewMap({
 
 		const timeout = setTimeout(() => {
 			lastRequestedWaypointKeyRef.current = waypointSignature;
-			recalculateDraftMutation.mutate(waypoints);
+			recalculateDraftMutation.mutate(toRouteWaypoints(waypoints));
 		}, 350);
 
 		return () => clearTimeout(timeout);
@@ -437,8 +455,7 @@ export default function RoutePreviewMap({
 		] as [[number, number], [number, number]];
 	}, [bbox?.north, bbox?.south, bbox?.east, bbox?.west]);
 
-	const visibleDraftGeoJson =
-		draftGeoJson ?? (waypoints.length > 1 ? toLineGeoJson(waypoints) : null);
+	const visibleDraftGeoJson = draftGeoJson;
 
 	return (
 		<MapContainer
@@ -446,12 +463,22 @@ export default function RoutePreviewMap({
 			zoom={POLAND_ZOOM}
 			bounds={bounds}
 			boundsOptions={{ padding: [16, 16], maxZoom: 18 }}
-			className="h-80 w-full"
-			scrollWheelZoom={false}
+			className={className ?? "h-80 w-full"}
+			scrollWheelZoom="center"
+			keyboard
+			dragging
+			doubleClickZoom
+			boxZoom
+			touchZoom
 		>
 			<TileLayer
 				attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 				url={`https://{s}.basemaps.cartocdn.com/${tileLayerVariant}/{z}/{x}/{y}{r}.png`}
+			/>
+			<MapInteractionEnhancer
+				initialCenter={POLAND_CENTER}
+				initialZoom={POLAND_ZOOM}
+				fitBounds={bounds}
 			/>
 			<FitRouteBounds bounds={bounds} />
 			<RouteEditMapClickHandler
@@ -462,9 +489,15 @@ export default function RoutePreviewMap({
 							return previous;
 						}
 
+						waypointIdCounterRef.current += 1;
+						const newViaPoint: EditableWaypoint = {
+							id: `wp-${waypointIdCounterRef.current}`,
+							lat: waypoint.lat,
+							lon: waypoint.lon,
+						};
 						const next = [
 							...previous.slice(0, -1),
-							waypoint,
+							newViaPoint,
 							previous[previous.length - 1],
 						];
 						setHasWaypointChanges(true);
@@ -473,7 +506,7 @@ export default function RoutePreviewMap({
 				}}
 			/>
 			{editMode && visibleDraftGeoJson ? (
-				<Pane name="route-draft-pane" style={{ zIndex: 420 }}>
+				<Pane name="route-draft-pane" style={{ zIndex: 430 }}>
 					<GeoJSON
 						data={visibleDraftGeoJson as never}
 						style={() => ({
@@ -485,7 +518,7 @@ export default function RoutePreviewMap({
 				</Pane>
 			) : null}
 			{editMode && geoJson ? (
-				<Pane name="route-original-pane" style={{ zIndex: 430 }}>
+				<Pane name="route-original-pane" style={{ zIndex: 420 }}>
 					<GeoJSON
 						data={geoJson as never}
 						style={() => ({
@@ -512,7 +545,7 @@ export default function RoutePreviewMap({
 
 						return (
 							<Marker
-								key={`${index}-${waypoint.lat}-${waypoint.lon}`}
+								key={waypoint.id}
 								position={[waypoint.lat, waypoint.lon]}
 								icon={getWaypointIcon(index, waypoints.length)}
 								draggable
@@ -521,12 +554,15 @@ export default function RoutePreviewMap({
 										const marker = event.target as L.Marker;
 										const latLng = marker.getLatLng();
 										setWaypoints((previous) => {
-											const next = [...previous];
-											next[index] = {
-												lat: Number(latLng.lat.toFixed(6)),
-												lon: Number(latLng.lng.toFixed(6)),
-											};
-											return next;
+											return previous.map((candidate, candidateIndex) =>
+												candidateIndex === index
+													? {
+															...candidate,
+															lat: Number(latLng.lat.toFixed(6)),
+															lon: Number(latLng.lng.toFixed(6)),
+														}
+													: candidate,
+											);
 										});
 										setHasWaypointChanges(true);
 									},
@@ -536,9 +572,17 @@ export default function RoutePreviewMap({
 									<Popup>
 										<button
 											type="button"
-											onClick={() => {
+											onMouseDown={(event) => {
+												event.preventDefault();
+												event.stopPropagation();
+											}}
+											onClick={(event) => {
+												event.preventDefault();
+												event.stopPropagation();
 												setWaypoints((previous) =>
-													previous.filter((_, waypointIndex) => waypointIndex !== index),
+													previous.filter(
+														(_, waypointIndex) => waypointIndex !== index,
+													),
 												);
 												setHasWaypointChanges(true);
 											}}

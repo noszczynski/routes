@@ -174,6 +174,17 @@ export default function RouteDetail({ routeId }: { routeId: string }) {
 	const [commentDraft, setCommentDraft] = useState("");
 	const [activeReplyId, setActiveReplyId] = useState<string | null>(null);
 	const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
+	const [selectedGpxFile, setSelectedGpxFile] = useState<File | null>(null);
+	const routeVersionsQuery = useQuery({
+		...orpc.routes.listRouteVersions.queryOptions({
+			input: { routeId },
+		}),
+		enabled: Boolean(
+			session?.user &&
+				routeQuery.data &&
+				session.user.id === routeQuery.data.userId,
+		),
+	});
 
 	const rateRouteMutation = useMutation({
 		mutationFn: async (value: "up" | "down" | null) =>
@@ -229,6 +240,73 @@ export default function RouteDetail({ routeId }: { routeId: string }) {
 		},
 		onError: (error) => {
 			toast.error(error.message || "Nie udało się zmienić prywatności trasy");
+		},
+	});
+
+	const setMainRouteVersionMutation = useMutation({
+		mutationFn: async (versionId: string) =>
+			client.routes.setMainRouteVersion({
+				routeId,
+				versionId,
+			}),
+		onSuccess: async () => {
+			toast.success("Ustawiono wersję główną trasy");
+			await Promise.all([
+				queryClient.invalidateQueries({ queryKey: routeQueryOptions.queryKey }),
+				queryClient.invalidateQueries({
+					queryKey: orpc.routes.listRouteVersions.queryOptions({
+						input: { routeId },
+					}).queryKey,
+				}),
+			]);
+		},
+		onError: (error) => {
+			toast.error(error.message || "Nie udało się ustawić wersji głównej");
+		},
+	});
+
+	const uploadRouteVersionMutation = useMutation({
+		mutationFn: async (params: {
+			gpxContent: string;
+			originalFileName?: string;
+			confirmDeleteOldest?: boolean;
+		}) =>
+			client.routes.uploadRouteVersionGpx({
+				routeId,
+				gpxContent: params.gpxContent,
+				originalFileName: params.originalFileName,
+				confirmDeleteOldest: params.confirmDeleteOldest ?? false,
+			}),
+		onSuccess: async () => {
+			setSelectedGpxFile(null);
+			toast.success("Dodano nową wersję trasy");
+			await Promise.all([
+				queryClient.invalidateQueries({ queryKey: routeQueryOptions.queryKey }),
+				queryClient.invalidateQueries({
+					queryKey: orpc.routes.listRouteVersions.queryOptions({
+						input: { routeId },
+					}).queryKey,
+				}),
+			]);
+		},
+		onError: async (error) => {
+			const shouldConfirmRotation = error.message.includes("limit");
+			if (shouldConfirmRotation && selectedGpxFile) {
+				const shouldReplaceOldest = window.confirm(
+					"Osiągnięto limit 3 wersji. Czy chcesz usunąć najstarszą wersję i dodać nową?",
+				);
+				if (!shouldReplaceOldest) {
+					return;
+				}
+				const gpxContent = await selectedGpxFile.text();
+				uploadRouteVersionMutation.mutate({
+					gpxContent,
+					originalFileName: selectedGpxFile.name,
+					confirmDeleteOldest: true,
+				});
+				return;
+			}
+			toast.error(error.message || "Nie udało się dodać wersji trasy");
 		},
 	});
 
@@ -354,6 +432,119 @@ export default function RouteDetail({ routeId }: { routeId: string }) {
 										</p>
 									</div>
 								</div>
+							</CardContent>
+						</Card>
+					) : null}
+
+					{isRouteOwner ? (
+						<Card>
+							<CardHeader>
+								<CardTitle>Historia wersji</CardTitle>
+								<CardDescription>
+									Zarządzaj wersjami trasy i wybierz wersję główną.
+								</CardDescription>
+							</CardHeader>
+							<CardContent className="flex flex-col gap-3">
+								<div className="flex flex-wrap items-center gap-2">
+									<input
+										type="file"
+										accept=".gpx,application/gpx+xml,application/xml,text/xml"
+										onChange={(event) => {
+											const file = event.target.files?.[0] ?? null;
+											setSelectedGpxFile(file);
+										}}
+									/>
+									<Button
+										type="button"
+										disabled={
+											!selectedGpxFile || uploadRouteVersionMutation.isPending
+										}
+										onClick={async () => {
+											if (!selectedGpxFile) {
+												return;
+											}
+											const gpxContent = await selectedGpxFile.text();
+											uploadRouteVersionMutation.mutate({
+												gpxContent,
+												originalFileName: selectedGpxFile.name,
+											});
+										}}
+									>
+										{uploadRouteVersionMutation.isPending
+											? "Wgrywanie..."
+											: "Dodaj wersję z GPX"}
+									</Button>
+								</div>
+								<p className="text-muted-foreground text-xs">
+									Limit: 3 wersje. Przy przekroczeniu możesz zastąpić
+									najstarszą.
+								</p>
+
+								{routeVersionsQuery.isLoading ? (
+									<p className="text-muted-foreground text-sm">
+										Ładowanie historii...
+									</p>
+								) : routeVersionsQuery.data?.length ? (
+									<div className="flex flex-col gap-2">
+										{routeVersionsQuery.data.map((version) => (
+											<div
+												key={version.id}
+												className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-2"
+											>
+												<div className="space-y-1">
+													<p className="font-medium text-sm">
+														Wersja #{version.versionOrder} ({version.sourceType}
+														)
+													</p>
+													<p className="text-muted-foreground text-xs">
+														{new Date(version.createdAt).toLocaleString(
+															"pl-PL",
+														)}
+													</p>
+													<p className="text-muted-foreground text-xs">
+														{version.distance
+															? `${version.distance} km`
+															: "Brak dystansu"}
+														{" • "}
+														{version.elevationGain
+															? `${Math.round(version.elevationGain)} m`
+															: "Brak podejść"}
+													</p>
+												</div>
+												<div className="flex items-center gap-2">
+													{version.isMain ? (
+														<span className="text-xs">Główna</span>
+													) : (
+														<Button
+															type="button"
+															size="sm"
+															variant="outline"
+															disabled={setMainRouteVersionMutation.isPending}
+															onClick={() =>
+																setMainRouteVersionMutation.mutate(version.id)
+															}
+														>
+															Ustaw jako główną
+														</Button>
+													)}
+													<a
+														href={`${env.NEXT_PUBLIC_SERVER_URL}/files/gpx/${route.id}?versionId=${version.id}`}
+														target="_blank"
+														rel="noreferrer"
+													>
+														<Button type="button" size="sm" variant="ghost">
+															Pobierz GPX
+														</Button>
+													</a>
+												</div>
+											</div>
+										))}
+									</div>
+								) : (
+									<p className="text-muted-foreground text-sm">
+										Brak zapisanych wersji trasy.
+									</p>
+								)}
 							</CardContent>
 						</Card>
 					) : null}

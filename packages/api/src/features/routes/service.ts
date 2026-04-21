@@ -3,31 +3,39 @@ import path from "node:path";
 import { env } from "@routes/env/server";
 import { gpx as gpxToGeoJson } from "@tmcw/togeojson";
 import { DOMParser, XMLSerializer } from "@xmldom/xmldom";
-import { Either, Effect } from "effect";
+import { Effect, Either } from "effect";
 import { XMLParser } from "fast-xml-parser";
 
 import {
 	GpxParseError,
-	RoutingEngineError,
 	RouteCommentParentMismatchError,
 	RouteCommentParentNotFoundError,
 	RouteNotFoundError,
 	RouteOwnershipError,
+	RouteVersionLimitReachedError,
+	RouteVersionNotFoundError,
+	RoutingEngineError,
 } from "./errors";
 import {
+	countRouteVersionsByRouteId,
 	countRouteVotes,
 	createRouteComment,
 	createRouteRecord,
-	deleteRouteVote,
+	createRouteVersionRecord,
 	deleteRouteById,
-	findRouteCommentById,
+	deleteRouteVersionById,
+	deleteRouteVote,
+	findOldestRouteVersionByRouteId,
 	findRouteById,
-	findRouteVoteByUser,
 	findRouteBySourceReference,
-	listRoutesByUserId,
+	findRouteCommentById,
+	findRouteVersionById,
+	findRouteVoteByUser,
 	listRouteCommentsByRouteId,
+	listRoutesByUserId,
 	listRoutesInBbox,
-	updateRouteMetricsById,
+	listRouteVersionsByRouteId,
+	setRouteMainVersionById,
 	updateRoutePrivacyById,
 	upsertRouteVote,
 } from "./repository";
@@ -69,15 +77,31 @@ type RouteRecord = {
 	title: string;
 	description: string | null;
 	isPublic: boolean;
-	distance: number | null;
-	elevationGain: number | null;
-	elevationLoss: number | null;
-	minElevation: number | null;
-	maxElevation: number | null;
-	bboxNorth: number | null;
-	bboxSouth: number | null;
-	bboxEast: number | null;
-	bboxWest: number | null;
+	source: string | null;
+	sourceReference: string | null;
+	mainVersionId: string | null;
+	mainVersion: {
+		id: string;
+		sourceType: "edit" | "upload";
+		originalFileName: string | null;
+		gpxFileName: string;
+		geoJsonFileName: string;
+		versionOrder: number;
+		distance: number | null;
+		elevationGain: number | null;
+		elevationLoss: number | null;
+		minElevation: number | null;
+		maxElevation: number | null;
+		bboxNorth: number | null;
+		bboxSouth: number | null;
+		bboxEast: number | null;
+		bboxWest: number | null;
+		createdAt: Date;
+		updatedAt: Date;
+	} | null;
+	_count: {
+		versions: number;
+	};
 	userId: string;
 	user: {
 		name: string;
@@ -159,7 +183,11 @@ const stripExtensionsAndWhitespace = (node: XmlDomNode) => {
 					? child.localName.toLowerCase()
 					: undefined;
 
-			if (localName === "extensions" || nodeName === "extensions" || nodeName.endsWith(":extensions")) {
+			if (
+				localName === "extensions" ||
+				nodeName === "extensions" ||
+				nodeName.endsWith(":extensions")
+			) {
 				node.removeChild(child);
 				child = nextSibling;
 				continue;
@@ -395,9 +423,6 @@ const buildOsrmRequestUrl = (params: {
 	return `${params.baseUrl}/route/v1/${params.profile}/${coordinates}?${query.toString()}`;
 };
 
-const waypointsToCoordinates = (waypoints: RouteWaypoint[]) =>
-	waypoints.map((waypoint) => [waypoint.lon, waypoint.lat]);
-
 const routeCoordinatesToGpx = (coordinates: number[][]) => {
 	const trkPoints = coordinates
 		.map((coordinate) => {
@@ -434,11 +459,14 @@ const fetchReroutedGpxFromOsrm = (params: {
 			const routingEngineBaseUrl = env.ROUTING_ENGINE_URL?.replace(/\/+$/, "");
 			const applicationBaseUrl = env.BETTER_AUTH_URL.replace(/\/+$/, "");
 
-			if (
-				!routingEngineBaseUrl ||
-				routingEngineBaseUrl === applicationBaseUrl
-			) {
-				return routeCoordinatesToGpx(waypointsToCoordinates(roundedWaypoints));
+			if (!routingEngineBaseUrl) {
+				throw new Error("ROUTING_ENGINE_URL is not configured");
+			}
+
+			if (routingEngineBaseUrl === applicationBaseUrl) {
+				throw new Error(
+					"ROUTING_ENGINE_URL points to application URL instead of routing engine",
+				);
 			}
 
 			const profile = resolveRoutingProfile(params.profile);
@@ -499,28 +527,33 @@ const parseGpx = (gpxContent: string) =>
 		catch: (cause) => new GpxParseError({ cause }),
 	});
 
+const MAX_ROUTE_VERSIONS = 3;
+
 export const resolveUploadsDir = (uploadsDir = env.GPX_UPLOADS_DIR) =>
 	path.isAbsolute(uploadsDir)
 		? uploadsDir
 		: path.resolve(process.cwd(), uploadsDir);
 
-export const getGpxFileName = (params: { routeId: string; userId: string }) =>
-	`${params.userId}-${params.routeId}.gpx`;
+export const buildRouteVersionFileNames = (params: {
+	routeId: string;
+	sourceType: "edit" | "upload";
+}) => {
+	const stamp = Date.now();
+	return {
+		gpxFileName: `${params.routeId}-${params.sourceType}-${stamp}.gpx`,
+		geoJsonFileName: `${params.routeId}-${params.sourceType}-${stamp}.geojson`,
+	};
+};
 
-export const getGpxFilePath = (
-	params: { routeId: string; userId: string },
+export const getRouteVersionGpxFilePath = (
+	gpxFileName: string,
 	uploadsDir = env.GPX_UPLOADS_DIR,
-) =>
-	path.join(
-		resolveUploadsDir(uploadsDir),
-		"gpx",
-		getGpxFileName(params),
-	);
+) => path.join(resolveUploadsDir(uploadsDir), "gpx", gpxFileName);
 
-export const getGeoJsonFilePath = (
-	routeId: string,
+export const getRouteVersionGeoJsonFilePath = (
+	geoJsonFileName: string,
 	uploadsDir = env.GPX_UPLOADS_DIR,
-) => path.join(resolveUploadsDir(uploadsDir), "geojson", `${routeId}.geojson`);
+) => path.join(resolveUploadsDir(uploadsDir), "geojson", geoJsonFileName);
 
 const ensureUploadsDirectories = (uploadsDir = env.GPX_UPLOADS_DIR) =>
 	Effect.tryPromise({
@@ -536,8 +569,8 @@ const ensureUploadsDirectories = (uploadsDir = env.GPX_UPLOADS_DIR) =>
 	});
 
 const writeRouteFiles = (params: {
-	routeId: string;
-	userId: string;
+	gpxFileName: string;
+	geoJsonFileName: string;
 	gpxContent: string;
 	geoJson: ParsedRouteData["geoJson"];
 }) =>
@@ -548,15 +581,12 @@ const writeRouteFiles = (params: {
 			try: async () => {
 				await Promise.all([
 					writeFile(
-						getGpxFilePath({
-							routeId: params.routeId,
-							userId: params.userId,
-						}),
+						getRouteVersionGpxFilePath(params.gpxFileName),
 						params.gpxContent,
 						"utf8",
 					),
 					writeFile(
-						getGeoJsonFilePath(params.routeId),
+						getRouteVersionGeoJsonFilePath(params.geoJsonFileName),
 						JSON.stringify(params.geoJson),
 						"utf8",
 					),
@@ -566,34 +596,30 @@ const writeRouteFiles = (params: {
 		});
 	});
 
-const deleteRouteFiles = (params: { routeId: string; userId: string }) =>
+const deleteRouteFiles = (params: {
+	gpxFileName: string;
+	geoJsonFileName: string;
+}) =>
 	Effect.tryPromise({
 		try: async () => {
 			await Promise.all(
 				[
-					getGpxFilePath({
-						routeId: params.routeId,
-						userId: params.userId,
-					}),
-					getGeoJsonFilePath(params.routeId),
-				].map(
-					async (filePath) => {
-						try {
-							await unlink(filePath);
-						} catch (error) {
-							const errorCode =
-								typeof error === "object" &&
-								error !== null &&
-								"code" in error
-									? (error as { code?: string }).code
-									: undefined;
+					getRouteVersionGpxFilePath(params.gpxFileName),
+					getRouteVersionGeoJsonFilePath(params.geoJsonFileName),
+				].map(async (filePath) => {
+					try {
+						await unlink(filePath);
+					} catch (error) {
+						const errorCode =
+							typeof error === "object" && error !== null && "code" in error
+								? (error as { code?: string }).code
+								: undefined;
 
-							if (errorCode !== "ENOENT") {
-								throw error;
-							}
+						if (errorCode !== "ENOENT") {
+							throw error;
 						}
-					},
-				),
+					}
+				}),
 			);
 		},
 		catch: (cause) => new GpxParseError({ cause }),
@@ -604,15 +630,17 @@ const toRouteSummary = (route: RouteRecord) => ({
 	title: route.title,
 	description: route.description,
 	isPublic: route.isPublic,
-	distance: route.distance,
-	elevationGain: route.elevationGain,
-	elevationLoss: route.elevationLoss,
-	minElevation: route.minElevation,
-	maxElevation: route.maxElevation,
-	bboxNorth: route.bboxNorth,
-	bboxSouth: route.bboxSouth,
-	bboxEast: route.bboxEast,
-	bboxWest: route.bboxWest,
+	mainVersionId: route.mainVersionId,
+	distance: route.mainVersion?.distance ?? null,
+	elevationGain: route.mainVersion?.elevationGain ?? null,
+	elevationLoss: route.mainVersion?.elevationLoss ?? null,
+	minElevation: route.mainVersion?.minElevation ?? null,
+	maxElevation: route.mainVersion?.maxElevation ?? null,
+	bboxNorth: route.mainVersion?.bboxNorth ?? null,
+	bboxSouth: route.mainVersion?.bboxSouth ?? null,
+	bboxEast: route.mainVersion?.bboxEast ?? null,
+	bboxWest: route.mainVersion?.bboxWest ?? null,
+	versionCount: route._count.versions,
 	userId: route.userId,
 	authorName: route.user.name,
 	createdAt: route.createdAt,
@@ -631,7 +659,9 @@ const toRouteComment = (comment: RouteCommentRecord): RouteCommentNode => ({
 	replies: [],
 });
 
-const buildCommentsTree = (comments: RouteCommentRecord[]): RouteCommentNode[] => {
+const buildCommentsTree = (
+	comments: RouteCommentRecord[],
+): RouteCommentNode[] => {
 	const commentMap = new Map(
 		comments.map((comment) => [comment.id, toRouteComment(comment)]),
 	);
@@ -683,7 +713,11 @@ const getRouteRating = (params: { routeId: string; userId?: string }) =>
 		}
 
 		const myVote =
-			userVote?.value === "up" ? "up" : userVote?.value === "down" ? "down" : null;
+			userVote?.value === "up"
+				? "up"
+				: userVote?.value === "down"
+					? "down"
+					: null;
 
 		return {
 			upvotes,
@@ -696,6 +730,73 @@ const getRouteComments = (routeId: string) =>
 	Effect.gen(function* () {
 		const comments = yield* listRouteCommentsByRouteId(routeId);
 		return buildCommentsTree(comments);
+	});
+
+const createRouteVersionWithLimit = (params: {
+	routeId: string;
+	sourceType: "edit" | "upload";
+	originalFileName?: string;
+	parsedRoute: ParsedRouteData;
+	confirmDeleteOldest?: boolean;
+}) =>
+	Effect.gen(function* () {
+		const versionCount = yield* countRouteVersionsByRouteId(params.routeId);
+		if (versionCount >= MAX_ROUTE_VERSIONS) {
+			if (!params.confirmDeleteOldest) {
+				return yield* Effect.fail(
+					new RouteVersionLimitReachedError({ limit: MAX_ROUTE_VERSIONS }),
+				);
+			}
+
+			const oldestVersion = yield* findOldestRouteVersionByRouteId(
+				params.routeId,
+			);
+			if (oldestVersion) {
+				yield* deleteRouteVersionById(oldestVersion.id);
+				yield* Effect.ignore(
+					deleteRouteFiles({
+						gpxFileName: oldestVersion.gpxFileName,
+						geoJsonFileName: oldestVersion.geoJsonFileName,
+					}),
+				);
+			}
+		}
+
+		const existingVersions = yield* listRouteVersionsByRouteId(params.routeId);
+		const nextVersionOrder =
+			Math.max(0, ...existingVersions.map((version) => version.versionOrder)) +
+			1;
+		const fileNames = buildRouteVersionFileNames({
+			routeId: params.routeId,
+			sourceType: params.sourceType,
+		});
+
+		yield* writeRouteFiles({
+			gpxFileName: fileNames.gpxFileName,
+			geoJsonFileName: fileNames.geoJsonFileName,
+			gpxContent: params.parsedRoute.gpxContent,
+			geoJson: params.parsedRoute.geoJson,
+		});
+
+		const createdVersion = yield* createRouteVersionRecord({
+			routeId: params.routeId,
+			sourceType: params.sourceType,
+			originalFileName: params.originalFileName,
+			gpxFileName: fileNames.gpxFileName,
+			geoJsonFileName: fileNames.geoJsonFileName,
+			versionOrder: nextVersionOrder,
+			...params.parsedRoute.metrics,
+		});
+
+		const route = yield* setRouteMainVersionById({
+			routeId: params.routeId,
+			mainVersionId: createdVersion.id,
+		});
+
+		return {
+			route,
+			version: createdVersion,
+		};
 	});
 
 export const listRoutes = (params: {
@@ -752,6 +853,7 @@ export const getRoute = (params: { routeId: string; userId?: string }) =>
 			...toRouteSummary(route),
 			source: route.source,
 			sourceReference: route.sourceReference,
+			canManageVersions: params.userId === route.userId,
 			rating,
 			comments,
 		};
@@ -779,6 +881,7 @@ export const createRoute = (params: {
 		}
 
 		const parsedRoute = yield* parseGpx(params.gpxContent);
+
 		const createdRoute = yield* createRouteRecord({
 			title: params.title,
 			description: params.description,
@@ -786,30 +889,23 @@ export const createRoute = (params: {
 			userId: params.userId,
 			source: params.source,
 			sourceReference: params.sourceReference,
-			...parsedRoute.metrics,
 		});
 
-		const writeResult = yield* Effect.either(
-			writeRouteFiles({
+		const createVersionResult = yield* Effect.either(
+			createRouteVersionWithLimit({
 				routeId: createdRoute.id,
-				userId: params.userId,
-				gpxContent: parsedRoute.gpxContent,
-				geoJson: parsedRoute.geoJson,
+				sourceType: "upload",
+				parsedRoute,
+				originalFileName: "initial.gpx",
 			}),
 		);
 
-		if (Either.isLeft(writeResult)) {
+		if (Either.isLeft(createVersionResult)) {
 			yield* Effect.ignore(deleteRouteById(createdRoute.id));
-			yield* Effect.ignore(
-				deleteRouteFiles({
-					routeId: createdRoute.id,
-					userId: params.userId,
-				}),
-			);
-			return yield* Effect.fail(writeResult.left);
+			return yield* Effect.fail(createVersionResult.left);
 		}
 
-		return toRouteSummary(createdRoute);
+		return toRouteSummary(createVersionResult.right.route);
 	});
 
 export const deleteRoute = (params: { routeId: string; userId: string }) =>
@@ -826,13 +922,18 @@ export const deleteRoute = (params: { routeId: string; userId: string }) =>
 			return yield* Effect.fail(new RouteOwnershipError());
 		}
 
+		const versions = yield* listRouteVersionsByRouteId(route.id);
+
 		yield* deleteRouteById(params.routeId);
-		yield* Effect.ignore(
-			deleteRouteFiles({
-				routeId: params.routeId,
-				userId: route.userId,
-			}),
-		);
+
+		for (const version of versions) {
+			yield* Effect.ignore(
+				deleteRouteFiles({
+					gpxFileName: version.gpxFileName,
+					geoJsonFileName: version.geoJsonFileName,
+				}),
+			);
+		}
 
 		return {
 			id: params.routeId,
@@ -916,6 +1017,7 @@ export const recalculateRoute = (params: {
 	waypoints: RouteWaypoint[];
 	profile?: RoutingProfile;
 	persist?: boolean;
+	confirmDeleteOldest?: boolean;
 }) =>
 	Effect.gen(function* () {
 		const route = yield* findRouteById(params.routeId);
@@ -930,16 +1032,16 @@ export const recalculateRoute = (params: {
 			return yield* Effect.fail(new RouteOwnershipError());
 		}
 
+		if (!route.mainVersion) {
+			return yield* Effect.fail(new RouteVersionNotFoundError());
+		}
+
+		const mainVersion = route.mainVersion;
+
 		// Ensure source GPX file exists before allowing recalculation.
 		yield* Effect.tryPromise({
 			try: () =>
-				readFile(
-					getGpxFilePath({
-						routeId: params.routeId,
-						userId: route.userId,
-					}),
-					"utf8",
-				),
+				readFile(getRouteVersionGpxFilePath(mainVersion.gpxFileName), "utf8"),
 			catch: (cause) => new GpxParseError({ cause }),
 		});
 
@@ -947,6 +1049,7 @@ export const recalculateRoute = (params: {
 			profile: params.profile,
 			waypoints: params.waypoints,
 		});
+
 		const parsedRoute = yield* parseGpx(reroutedGpx);
 
 		if (!params.persist) {
@@ -960,22 +1063,126 @@ export const recalculateRoute = (params: {
 			};
 		}
 
-		yield* writeRouteFiles({
+		const persistedRoute = yield* createRouteVersionWithLimit({
 			routeId: route.id,
-			userId: route.userId,
-			gpxContent: parsedRoute.gpxContent,
-			geoJson: parsedRoute.geoJson,
-		});
-
-		const updatedRoute = yield* updateRouteMetricsById({
-			routeId: route.id,
-			...parsedRoute.metrics,
+			sourceType: "edit",
+			parsedRoute,
+			confirmDeleteOldest: params.confirmDeleteOldest,
 		});
 
 		return {
-			route: toRouteSummary(updatedRoute),
+			route: toRouteSummary(persistedRoute.route),
 			geoJson: parsedRoute.geoJson,
 			gpxContent: parsedRoute.gpxContent,
+		};
+	});
+
+export const listRouteVersions = (params: {
+	routeId: string;
+	userId: string;
+}) =>
+	Effect.gen(function* () {
+		const route = yield* findRouteById(params.routeId);
+		if (!route) {
+			return yield* Effect.fail(
+				new RouteNotFoundError({ routeId: params.routeId }),
+			);
+		}
+
+		if (route.userId !== params.userId) {
+			return yield* Effect.fail(new RouteOwnershipError());
+		}
+
+		const versions = yield* listRouteVersionsByRouteId(params.routeId);
+
+		return versions.map((version) => ({
+			id: version.id,
+			sourceType: version.sourceType,
+			originalFileName: version.originalFileName,
+			versionOrder: version.versionOrder,
+			distance: version.distance,
+			elevationGain: version.elevationGain,
+			elevationLoss: version.elevationLoss,
+			minElevation: version.minElevation,
+			maxElevation: version.maxElevation,
+			bboxNorth: version.bboxNorth,
+			bboxSouth: version.bboxSouth,
+			bboxEast: version.bboxEast,
+			bboxWest: version.bboxWest,
+			isMain: route.mainVersionId === version.id,
+			createdAt: version.createdAt,
+			updatedAt: version.updatedAt,
+		}));
+	});
+
+export const setMainRouteVersion = (params: {
+	routeId: string;
+	versionId: string;
+	userId: string;
+}) =>
+	Effect.gen(function* () {
+		const route = yield* findRouteById(params.routeId);
+
+		if (!route) {
+			return yield* Effect.fail(
+				new RouteNotFoundError({ routeId: params.routeId }),
+			);
+		}
+
+		if (route.userId !== params.userId) {
+			return yield* Effect.fail(new RouteOwnershipError());
+		}
+
+		const version = yield* findRouteVersionById({
+			routeId: params.routeId,
+			versionId: params.versionId,
+		});
+
+		if (!version) {
+			return yield* Effect.fail(new RouteVersionNotFoundError());
+		}
+
+		const updatedRoute = yield* setRouteMainVersionById({
+			routeId: params.routeId,
+			mainVersionId: version.id,
+		});
+
+		return toRouteSummary(updatedRoute);
+	});
+
+export const uploadRouteVersionGpx = (params: {
+	routeId: string;
+	userId: string;
+	gpxContent: string;
+	originalFileName?: string;
+	confirmDeleteOldest?: boolean;
+}) =>
+	Effect.gen(function* () {
+		const route = yield* findRouteById(params.routeId);
+
+		if (!route) {
+			return yield* Effect.fail(
+				new RouteNotFoundError({ routeId: params.routeId }),
+			);
+		}
+
+		if (route.userId !== params.userId) {
+			return yield* Effect.fail(new RouteOwnershipError());
+		}
+
+		const parsedRoute = yield* parseGpx(params.gpxContent);
+
+		const persisted = yield* createRouteVersionWithLimit({
+			routeId: params.routeId,
+			sourceType: "upload",
+			originalFileName: params.originalFileName,
+			parsedRoute,
+			confirmDeleteOldest: params.confirmDeleteOldest,
+		});
+
+		return {
+			route: toRouteSummary(persisted.route),
+			geoJson: parsedRoute.geoJson,
 		};
 	});
 

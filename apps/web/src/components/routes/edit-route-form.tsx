@@ -46,20 +46,38 @@ export default function EditRouteForm({ routeId }: { routeId: string }) {
 	const [isDraftCalculating, setIsDraftCalculating] = useState(false);
 
 	const saveRouteMutation = useMutation({
-		mutationFn: async (waypoints: RouteWaypoint[]) =>
+		mutationFn: async (params: {
+			waypoints: RouteWaypoint[];
+			confirmDeleteOldest?: boolean;
+		}) =>
 			client.routes.recalculateRoute({
 				routeId,
-				waypoints,
+				waypoints: params.waypoints,
 				profile: "cycling",
 				persist: true,
+				confirmDeleteOldest: params.confirmDeleteOldest ?? false,
 			}),
 		onSuccess: async () => {
+			setHasDraftChanges(false);
+			setIsDraftCalculating(false);
 			toast.success("Zapisano nowy przebieg trasy");
 			await queryClient.invalidateQueries({
 				queryKey: routeQueryOptions.queryKey,
 			});
 		},
 		onError: (error) => {
+			if (error.message.includes("limit")) {
+				const shouldReplaceOldest = window.confirm(
+					"Osiągnięto limit 3 wersji. Czy chcesz usunąć najstarszą wersję i zapisać nową?",
+				);
+				if (shouldReplaceOldest) {
+					saveRouteMutation.mutate({
+						waypoints: draftWaypoints,
+						confirmDeleteOldest: true,
+					});
+				}
+				return;
+			}
 			toast.error(error.message || "Nie udało się zapisać przebiegu trasy");
 		},
 	});
@@ -92,7 +110,7 @@ export default function EditRouteForm({ routeId }: { routeId: string }) {
 	}
 
 	return (
-		<div className="flex flex-col gap-4 p-4 md:p-6">
+		<div className="flex min-h-[calc(100vh-5rem)] flex-col gap-3 p-3 md:gap-4 md:p-4">
 			<div className="flex flex-wrap items-center justify-between gap-3">
 				<div className="flex flex-col gap-1">
 					<h1 className="font-semibold text-2xl">Edycja trasy</h1>
@@ -110,27 +128,31 @@ export default function EditRouteForm({ routeId }: { routeId: string }) {
 							isDraftCalculating ||
 							saveRouteMutation.isPending
 						}
-						onClick={() => saveRouteMutation.mutate(draftWaypoints)}
+						onClick={() =>
+							saveRouteMutation.mutate({
+								waypoints: draftWaypoints,
+							})
+						}
 					>
 						{saveRouteMutation.isPending ? "Zapisywanie..." : "Zapisz zmiany"}
 					</Button>
 				</div>
 			</div>
 
-			<Card>
-				<CardHeader>
+			<Card className="flex min-h-0 flex-1 flex-col">
+				<CardHeader className="space-y-1 pb-3">
 					<CardTitle>Nowy przebieg</CardTitle>
-					<CardDescription>
+					<CardDescription className="text-xs md:text-sm">
 						Przeciągnij punkt startu/końca lub dodaj via point klikając mapę.
-						Punkt pośredni usuń z popupu markera. Szary ślad pokazuje oryginalny
-						przebieg i ma priorytet przy nakładaniu.
+						Punkt pośredni usuń z popupu markera.
 					</CardDescription>
 				</CardHeader>
-				<CardContent className="aspect-square">
+				<CardContent className="flex-1 p-2 pt-0 md:p-3 md:pt-0">
 					<RoutePreviewMap
 						routeId={route.id}
 						editMode
 						dataVersion={route.updatedAt}
+						className="h-[68vh] min-h-[460px] w-full rounded-md md:h-[75vh]"
 						onDraftChange={(draft) => {
 							setDraftWaypoints(draft.waypoints);
 							setHasDraftChanges(draft.hasChanges);

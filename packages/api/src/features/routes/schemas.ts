@@ -72,4 +72,21 @@ export const RecalculateRouteInputSchema = z.object({
 	profile: z.enum(["cycling", "driving", "walking"]).default("cycling"),
 	waypoints: z.array(RouteWaypointSchema).min(2),
 	persist: z.boolean().default(false),
+	confirmDeleteOldest: z.boolean().default(false),
+});
+
+export const ListRouteVersionsInputSchema = z.object({
+	routeId: z.string().min(1),
+});
+
+export const SetMainRouteVersionInputSchema = z.object({
+	routeId: z.string().min(1),
+	versionId: z.string().min(1),
+});
+
+export const UploadRouteVersionGpxInputSchema = z.object({
+	routeId: z.string().min(1),
+	gpxContent: z.string().min(1),
+	originalFileName: z.string().min(1).optional(),
+	confirmDeleteOldest: z.boolean().default(false),
 });
