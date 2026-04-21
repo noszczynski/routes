@@ -336,6 +336,9 @@ importers:
       dotenv:
         specifier: 'catalog:'
         version: 17.4.2
+      effect:
+        specifier: ^3.21.1
+        version: 3.21.1
       pg:
         specifier: ^8.17.1
         version: 8.20.0

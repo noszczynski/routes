@@ -1,0 +1,24 @@
+model Route {
+  id            String   @id @default(cuid())
+  title         String
+  description   String?
+  distance      Float?
+  elevationGain Float?   @map("elevation_gain")
+  elevationLoss Float?   @map("elevation_loss")
+  minElevation  Float?   @map("min_elevation")
+  maxElevation  Float?   @map("max_elevation")
+  bboxNorth     Float?   @map("bbox_north")
+  bboxSouth     Float?   @map("bbox_south")
+  bboxEast      Float?   @map("bbox_east")
+  bboxWest      Float?   @map("bbox_west")
+  source        String?
+  sourceReference String? @map("source_reference")
+  userId        String   @map("user_id")
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade, map: "routes_user_id_fkey")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@index([userId], map: "routes_user_id_idx")
+  @@unique([userId, sourceReference], map: "routes_user_id_source_reference_key")
+  @@map("routes")
+}

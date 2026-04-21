@@ -1,0 +1,14 @@
+model StravaConnection {
+  id                   String   @id @default(cuid())
+  userId               String   @unique(map: "strava_connections_user_id_key") @map("user_id")
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade, map: "strava_connections_user_id_fkey")
+  stravaAthleteId      String   @unique(map: "strava_connections_strava_athlete_id_key") @map("strava_athlete_id")
+  accessToken          String   @map("access_token")
+  refreshToken         String   @map("refresh_token")
+  accessTokenExpiresAt DateTime @map("access_token_expires_at")
+  scope                String
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  @@map("strava_connections")
+}

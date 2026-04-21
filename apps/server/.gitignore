@@ -47,6 +47,11 @@ lerna-debug.log*
 .DS_Store
 *.pem
 
+# uploaded GPX routes (see GPX_UPLOADS_DIR)
+uploads/*
+uploads/gpx/
+uploads/geojson
+
 # local db
 *.db*
 

@@ -1,29 +1,33 @@
 {
-  "name": "@routes/api",
-  "type": "module",
-  "exports": {
-    ".": {
-      "default": "./src/index.ts"
-    },
-    "./*": {
-      "default": "./src/*.ts"
-    }
-  },
-  "scripts": {},
-  "dependencies": {
-    "@orpc/client": "catalog:",
-    "@orpc/openapi": "catalog:",
-    "@orpc/server": "catalog:",
-    "@orpc/zod": "catalog:",
-    "@routes/auth": "workspace:*",
-    "@routes/db": "workspace:*",
-    "@routes/env": "workspace:*",
-    "dotenv": "catalog:",
-    "zod": "catalog:"
-  },
-  "devDependencies": {
-    "@routes/config": "workspace:*",
-    "hono": "catalog:",
-    "typescript": "catalog:"
-  }
+	"name": "@routes/api",
+	"type": "module",
+	"exports": {
+		".": {
+			"default": "./src/index.ts"
+		},
+		"./*": {
+			"default": "./src/*.ts"
+		}
+	},
+	"scripts": {},
+	"dependencies": {
+		"@orpc/client": "catalog:",
+		"@orpc/openapi": "catalog:",
+		"@orpc/server": "catalog:",
+		"@orpc/zod": "catalog:",
+		"@routes/auth": "workspace:*",
+		"@routes/db": "workspace:*",
+		"@routes/env": "workspace:*",
+		"@tmcw/togeojson": "^7.1.2",
+		"@xmldom/xmldom": "^0.9.10",
+		"dotenv": "catalog:",
+		"effect": "^3.21.1",
+		"fast-xml-parser": "^5.7.1",
+		"zod": "catalog:"
+	},
+	"devDependencies": {
+		"@routes/config": "workspace:*",
+		"hono": "catalog:",
+		"typescript": "catalog:"
+	}
 }
