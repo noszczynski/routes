@@ -1,0 +1,3 @@
+{
+  "extends": "@routes/config/tsconfig.base.json"
+}
